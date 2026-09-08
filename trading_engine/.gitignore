@@ -1,0 +1,10 @@
+.env
+
+# Strategy orchestrators — still evolving, kept locally, not part of the
+# committed engine until one is chosen as the demonstrated example.
+live_trading.py
+live_trading2.py
+live_trading_GTC.py
+paper_trading.py
+paper_trade_2.py
+paper_trade_clob.py
