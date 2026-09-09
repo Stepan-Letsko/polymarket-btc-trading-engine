@@ -13,6 +13,7 @@
     header {
       padding: 16px 24px;
       border-bottom: 1px solid #232330;
+      position: relative;
     }
     header h1 {
       margin: 0;
@@ -26,6 +27,50 @@
     }
     #status.connected { color: #4caf7d; }
     #status.disconnected { color: #d9534f; }
+
+    /* Centered title, top of header */
+    #main-title {
+      position: absolute;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: #ffffff;
+      font-size: 16px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    #window-slot {
+      color: #7a7a8c;
+      font-weight: 400;
+      font-size: 13px;
+      margin-left: 6px;
+    }
+
+    /* Countdown + price-to-beat, pinned to the top-right of the header */
+    #market-info {
+      position: absolute;
+      top: 16px;
+      right: 24px;
+      text-align: right;
+      font-size: 13px;
+    }
+    #countdown-label {
+      color: #ffffff;
+    }
+    #next-window {
+      color: #e0505a;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      font-size: 15px;
+    }
+    #price-to-beat {
+      color: #7a7a8c;
+      margin-top: 4px;
+    }
+    #price-to-beat .value {
+      color: #e6e6e6;
+      font-weight: 600;
+    }
 
     /* Row of toggle checkboxes, one per price source */
     #sources {
@@ -54,19 +99,88 @@
       display: inline-block;
     }
 
-    #chart {
-      width: 100%;
+    #main {
+      display: flex;
       height: calc(100vh - 110px);
+    }
+    #indicators {
+      width: 220px;
+      flex-shrink: 0;
+      border-right: 1px solid #232330;
+      padding: 16px;
+      box-sizing: border-box;
+      overflow-y: auto;
+    }
+    #indicators h2 {
+      margin: 0 0 14px 0;
+      font-size: 12px;
+      font-weight: 600;
+      color: #7a7a8c;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .indicator-row {
+      margin-bottom: 16px;
+    }
+    .indicator-label {
+      font-size: 11px;
+      color: #7a7a8c;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+    .indicator-value {
+      font-size: 20px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      margin-top: 3px;
+    }
+    .indicator-value.bullish { color: #4caf7d; }
+    .indicator-value.bearish { color: #e0505a; }
+    .indicator-value.neutral { color: #c8c8d4; }
+
+    #chart {
+      flex: 1;
+      min-width: 0;
     }
   </style>
 </head>
 <body>
   <header>
     <h1>BTC/USD — live price by source</h1>
+    <div id="main-title">
+      Polymarket 5 min Bitcoin Market
+      <span id="window-slot"></span>
+    </div>
     <div id="status" class="disconnected">connecting…</div>
     <div id="sources"></div>
+    <div id="market-info">
+      <div id="countdown-label">Time until next window</div>
+      <div id="next-window">--:--</div>
+      <div id="price-to-beat">Price to beat: <span class="value">—</span></div>
+    </div>
   </header>
-  <div id="chart"></div>
+  <div id="main">
+    <div id="indicators">
+      <h2>Indicators</h2>
+      <div class="indicator-row">
+        <div class="indicator-label">OBI (Binance)</div>
+        <div class="indicator-value neutral" id="obi-binance">—</div>
+      </div>
+      <div class="indicator-row">
+        <div class="indicator-label">Trade Delta (Binance)</div>
+        <div class="indicator-value neutral" id="delta-binance">—</div>
+      </div>
+      <div class="indicator-row">
+        <div class="indicator-label">OBI (CLOB — UP)</div>
+        <div class="indicator-value neutral" id="obi-clob-up">—</div>
+      </div>
+      <div class="indicator-row">
+        <div class="indicator-label">OBI (CLOB — DOWN)</div>
+        <div class="indicator-value neutral" id="obi-clob-down">—</div>
+      </div>
+    </div>
+    <div id="chart"></div>
+  </div>
 
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <script>
@@ -78,11 +192,40 @@
     const SOURCES = {
       binance:        { label: "Binance",                    color: "#e0a83a" },
       coinbase:       { label: "Coinbase",                    color: "#4a90d9" },
-      kraken:         { label: "Kraken",                      color: "#e0505a" },
-      bitstamp:       { label: "Bitstamp",                    color: "#4caf7d" },
       binance_relay:  { label: "Binance (Polymarket relay)",  color: "#5fd4d4" },
       chainlink:      { label: "Chainlink (oracle)",          color: "#b681e0" },
+      // Polymarket's own UP/DOWN token prices run 0-1 (they're
+      // probabilities in cents), not BTC-dollar-scale — these get their
+      // own left-hand axis instead of sharing the right one.
+      clob_up:        { label: "UP token",                    color: "#4caf7d", scale: "left" },
+      clob_down:      { label: "DOWN token",                  color: "#e0505a", scale: "left" },
     };
+
+    // lightweight-charts formats its own axis/crosshair time labels using
+    // the browser's local timezone by default — nothing to do with the
+    // ET-based header text above, so they can disagree. These force
+    // every time label the chart draws through America/New_York too.
+    const etTimeFmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    });
+    const etDayFmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", day: "2-digit", month: "short",
+    });
+    const etMonthFmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", month: "short", year: "2-digit",
+    });
+    const etYearFmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", year: "numeric",
+    });
+    function formatETTick(unixSeconds, tickMarkType) {
+      const date = new Date(unixSeconds * 1000);
+      const TM = LightweightCharts.TickMarkType;
+      if (tickMarkType === TM.Year) return etYearFmt.format(date);
+      if (tickMarkType === TM.Month) return etMonthFmt.format(date);
+      if (tickMarkType === TM.DayOfMonth) return etDayFmt.format(date);
+      return etTimeFmt.format(date); // Time / TimeWithSeconds
+    }
 
     const chart = LightweightCharts.createChart(document.getElementById("chart"), {
       layout: { background: { color: "#0e0e12" }, textColor: "#c8c8d4" },
@@ -90,15 +233,125 @@
         vertLines: { color: "#1a1a24" },
         horzLines: { color: "#1a1a24" },
       },
-      timeScale: { timeVisible: true, secondsVisible: true },
+      localization: {
+        timeFormatter: (unixSeconds) => etTimeFmt.format(new Date(unixSeconds * 1000)),
+      },
+      timeScale: { timeVisible: true, secondsVisible: true, tickMarkFormatter: formatETTick },
+      // scaleMargins: 0 so the fixed 0-1 range below renders as an exact
+      // 0-1 axis, not with extra padding auto-added above/below it.
+      leftPriceScale: { visible: true, borderColor: "#232330", scaleMargins: { top: 0, bottom: 0 } },
+      rightPriceScale: { borderColor: "#232330" },
     });
 
+    // Sources checked on page load. Everything else still streams in the
+    // background (per the "always stream, toggle just shows/hides" design),
+    // it's just visually hidden until you turn it on.
+    const DEFAULT_ON = new Set(["binance", "chainlink", "clob_up", "clob_down"]);
+
     // One line series per source, so each can be shown/hidden independently
-    // while all of them keep streaming in the background.
+    // while all of them keep streaming in the background. UP/DOWN tokens
+    // go on the left price scale (see SOURCES above); everything else
+    // shares the default right one.
     const series = {};
-    for (const [key, { color }] of Object.entries(SOURCES)) {
-      series[key] = chart.addLineSeries({ color, lineWidth: 2 });
+    for (const [key, { color, scale }] of Object.entries(SOURCES)) {
+      series[key] = chart.addLineSeries({
+        color,
+        lineWidth: 2,
+        visible: DEFAULT_ON.has(key),
+        priceScaleId: scale === "left" ? "left" : "right",
+      });
     }
+
+    // UP/DOWN token prices are always between 0 and 1 by definition —
+    // lock the left axis to that fixed range instead of letting it
+    // autoscale to whatever's currently in view (which would otherwise
+    // zoom in/out awkwardly as the price moves, the same "seconds
+    // compressing" issue we saw with the time axis, but on the price
+    // axis instead).
+    const fixedZeroToOne = () => ({ priceRange: { minValue: 0, maxValue: 1 } });
+    series.clob_up.applyOptions({ autoscaleInfoProvider: fixedZeroToOne });
+    series.clob_down.applyOptions({ autoscaleInfoProvider: fixedZeroToOne });
+
+    // The "P0" price line — the price to beat for the current 5-minute
+    // market, captured from Chainlink right as each window opens (same
+    // logic as handle_rtds_fv() in live_trading2.py). Attached directly
+    // to the chainlink series (which already has real data flowing
+    // through it), rather than a separate empty series — a plain,
+    // well-supported way to use this library's price-line feature.
+    let boundaryLine = null;
+    let boundaryPriceValue = null;
+
+    function setBoundaryPrice(price) {
+      boundaryPriceValue = price;
+      if (boundaryLine) series.chainlink.removePriceLine(boundaryLine);
+      boundaryLine = series.chainlink.createPriceLine({
+        price,
+        color: "#ffffff",
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+        axisLabelVisible: true,
+        title: "P0 (5m open)",
+      });
+      document.querySelector("#price-to-beat .value").textContent =
+        "$" + price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    // Countdown to the next 5-minute market, and the current window's
+    // time slot in US Eastern time (matching how Polymarket's own site
+    // labels these markets, e.g. "7:35 - 7:40AM ET"). Both are just real
+    // UTC clock marks (:00, :05, :10, ...), so this can be computed
+    // entirely from the browser's own clock — no need to ask the backend
+    // what time it thinks it is. Intl's America/New_York timezone
+    // handles the EST/EDT daylight-saving switch automatically.
+    const nextWindowEl = document.getElementById("next-window");
+    const windowSlotEl = document.getElementById("window-slot");
+    const etFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
+    function formatET(date) {
+      const parts = etFormatter.formatToParts(date);
+      const get = (type) => parts.find((p) => p.type === type)?.value || "";
+      return { time: `${get("hour")}:${get("minute")}`, ampm: get("dayPeriod") };
+    }
+
+    let lastWindowStart = null;
+    function updateCountdown() {
+      const nowSec = Date.now() / 1000;
+      const windowStart = Math.floor(nowSec / 300) * 300;
+      const secondsLeft = 300 - (nowSec % 300);
+      const mins = Math.floor(secondsLeft / 60);
+      const secs = Math.floor(secondsLeft % 60);
+      nextWindowEl.textContent = `${mins}:${String(secs).padStart(2, "0")}`;
+
+      if (windowStart !== lastWindowStart) {
+        lastWindowStart = windowStart;
+        const start = formatET(new Date(windowStart * 1000));
+        const end = formatET(new Date((windowStart + 300) * 1000));
+        windowSlotEl.textContent = `${start.time} - ${end.time}${end.ampm} ET`;
+      }
+    }
+    updateCountdown();
+    setInterval(updateCountdown, 1000);
+
+    // The vertical (price) axis normally auto-fits to only whatever data
+    // is currently visible — it does NOT automatically stretch to include
+    // a price line's value once real price has drifted away from it. That
+    // was the actual bug: the line was always being drawn correctly, just
+    // below/above the currently visible price range. This forces the
+    // chainlink series' own auto-scale to always include the P0 price too.
+    series.chainlink.applyOptions({
+      autoscaleInfoProvider: (original) => {
+        const res = original();
+        if (boundaryPriceValue !== null && res && res.priceRange) {
+          res.priceRange.minValue = Math.min(res.priceRange.minValue, boundaryPriceValue);
+          res.priceRange.maxValue = Math.max(res.priceRange.maxValue, boundaryPriceValue);
+        }
+        return res;
+      },
+    });
 
     // Build the toggle row from the same SOURCES config.
     const sourcesEl = document.getElementById("sources");
@@ -109,7 +362,7 @@
 
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
-      checkbox.checked = true;
+      checkbox.checked = DEFAULT_ON.has(key);
       checkbox.addEventListener("change", () => {
         series[key].applyOptions({ visible: checkbox.checked });
       });
@@ -130,7 +383,50 @@
     window.addEventListener("resize", resizeChart);
     resizeChart();
 
+    // OBI (Order Book Imbalance): 0.5 is neutral, above leans bullish
+    // (more resting buy interest), below leans bearish. Trade delta:
+    // positive means more aggressive buying than selling recently.
+    function setIndicator(elId, value, formatFn, isBullish) {
+      const el = document.getElementById(elId);
+      el.textContent = formatFn(value);
+      el.className = "indicator-value " + (isBullish === null ? "neutral" : isBullish ? "bullish" : "bearish");
+    }
+
+    function updateIndicators(data) {
+      setIndicator("obi-binance", data.obi_binance, (v) => v.toFixed(3), data.obi_binance > 0.5);
+      setIndicator("delta-binance", data.delta_binance, (v) => (v >= 0 ? "+" : "") + v.toFixed(2), data.delta_binance > 0);
+      setIndicator("obi-clob-up", data.obi_clob_up, (v) => v.toFixed(3), data.obi_clob_up > 0.5);
+      setIndicator("obi-clob-down", data.obi_clob_down, (v) => v.toFixed(3), data.obi_clob_down > 0.5);
+    }
+
     const statusEl = document.getElementById("status");
+
+    // Keep the chart showing roughly the last WINDOW_SECONDS of real time.
+    //
+    // Important quirk: lightweight-charts spaces data points at a fixed
+    // number of pixels apart, one after another — it does NOT space them
+    // by literal elapsed time. Since several exchanges can each send
+    // multiple updates per second, setting the visible range once at the
+    // start isn't enough — a burst of ticks in the first couple of real
+    // seconds is enough to fill the whole window, which is why it visibly
+    // "zoomed in" further on its own. So instead we keep re-applying the
+    // last-N-seconds window on an interval, correcting that drift
+    // continuously rather than trusting it to hold after being set once.
+    const WINDOW_SECONDS = 60;
+    let followLive = true;
+
+    // If you manually drag or scroll/zoom the chart, stop auto-following
+    // so we don't fight you — resumes on page reload.
+    const chartEl = document.getElementById("chart");
+    ["mousedown", "wheel", "touchstart"].forEach((evt) => {
+      chartEl.addEventListener(evt, () => { followLive = false; }, { passive: true });
+    });
+
+    setInterval(() => {
+      if (!followLive) return;
+      const nowSec = Math.floor(Date.now() / 1000);
+      chart.timeScale().setVisibleRange({ from: nowSec - WINDOW_SECONDS, to: nowSec + 1 });
+    }, 500);
 
     function connect() {
       // Same host/port the page was loaded from, just switched to the ws:// protocol.
@@ -143,6 +439,17 @@
 
       ws.onmessage = (event) => {
         const point = JSON.parse(event.data);
+
+        if (point.type === "boundary") {
+          setBoundaryPrice(point.value);
+          return;
+        }
+
+        if (point.type === "indicators") {
+          updateIndicators(point);
+          return;
+        }
+
         const targetSeries = series[point.source];
         if (!targetSeries) return; // unknown source, ignore
         // series.update() adds a new point, or overwrites the current one

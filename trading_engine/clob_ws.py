@@ -348,6 +348,60 @@ async def stream_market(token_up, token_down, on_message=None):
 
 
 # ─────────────────────────────────────────────
+# AUTO-ROTATING MARKET STREAM
+# ─────────────────────────────────────────────
+
+async def stream_current_market(on_message=None):
+    """
+    Like stream_market(), but handles the 5-minute market rotation itself:
+    fetches the currently-open BTC Up/Down market, streams it until that
+    window's end_date passes, then automatically fetches the new market
+    and reconnects with its token IDs. Callers just call this once and
+    never need to track which market is currently open themselves.
+
+    Parameters:
+        on_message - optional callback, receives each parsed message dict
+                     (same shape as stream_market()). If None, prints to
+                     terminal.
+    """
+    while True:
+        # get_current_market() makes a blocking HTTP request (via
+        # requests) — run it off the event loop so it doesn't stall
+        # everything else while waiting on the network.
+        market = await asyncio.to_thread(get_current_market)
+        if not market:
+            print("Could not find current market, retrying in 2s...")
+            await asyncio.sleep(2)
+            continue
+
+        end_dt = datetime.fromisoformat(market["end_date"].replace("Z", "+00:00"))
+        seconds_left = (end_dt - datetime.now(timezone.utc)).total_seconds()
+        # +1s margin so we don't race the next market not existing yet
+        # in the API right as this window ends.
+        window_budget = max(seconds_left, 0) + 1
+
+        stream_task = asyncio.create_task(
+            stream_market(market["token_up"], market["token_down"], on_message=on_message)
+        )
+        try:
+            done, _ = await asyncio.wait({stream_task}, timeout=window_budget)
+            if stream_task in done:
+                # The connection itself died before the window ended —
+                # surface whatever killed it so the caller's own retry
+                # logic (e.g. a reconnect wrapper) can handle it.
+                stream_task.result()
+        finally:
+            if not stream_task.done():
+                stream_task.cancel()
+            try:
+                await stream_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        # Loop back around: the window's over, fetch the new current
+        # market and reconnect with its tokens.
+
+
+# ─────────────────────────────────────────────
 # RUN DIRECTLY
 # ─────────────────────────────────────────────
 
