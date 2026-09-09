@@ -1,1 +1,0 @@
-# Polymarket BTC Trading Engine
