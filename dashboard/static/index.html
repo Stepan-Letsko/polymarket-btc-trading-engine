@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>BTC Live Price</title>
+  <style>
+    body {
+      margin: 0;
+      background: #0e0e12;
+      color: #e6e6e6;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    header {
+      padding: 16px 24px;
+      border-bottom: 1px solid #232330;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    #status {
+      font-size: 12px;
+      color: #7a7a8c;
+      margin-top: 4px;
+    }
+    #status.connected { color: #4caf7d; }
+    #status.disconnected { color: #d9534f; }
+
+    /* Row of toggle checkboxes, one per price source */
+    #sources {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+      margin-top: 12px;
+    }
+    .source-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: #c8c8d4;
+      cursor: pointer;
+      user-select: none;
+    }
+    .source-toggle input {
+      accent-color: currentColor;
+      cursor: pointer;
+    }
+    .swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    #chart {
+      width: 100%;
+      height: calc(100vh - 110px);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>BTC/USD — live price by source</h1>
+    <div id="status" class="disconnected">connecting…</div>
+    <div id="sources"></div>
+  </header>
+  <div id="chart"></div>
+
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script>
+    // Every source we can chart, and the color its line/checkbox uses.
+    // "chainlink" is Polymarket's actual resolution oracle — it computes
+    // its own independent price (an average across multiple exchanges),
+    // not just a copy of Binance's number, so it gets a distinct color
+    // rather than a shade near binance/binance_relay.
+    const SOURCES = {
+      binance:        { label: "Binance",                    color: "#e0a83a" },
+      coinbase:       { label: "Coinbase",                    color: "#4a90d9" },
+      kraken:         { label: "Kraken",                      color: "#e0505a" },
+      bitstamp:       { label: "Bitstamp",                    color: "#4caf7d" },
+      binance_relay:  { label: "Binance (Polymarket relay)",  color: "#5fd4d4" },
+      chainlink:      { label: "Chainlink (oracle)",          color: "#b681e0" },
+    };
+
+    const chart = LightweightCharts.createChart(document.getElementById("chart"), {
+      layout: { background: { color: "#0e0e12" }, textColor: "#c8c8d4" },
+      grid: {
+        vertLines: { color: "#1a1a24" },
+        horzLines: { color: "#1a1a24" },
+      },
+      timeScale: { timeVisible: true, secondsVisible: true },
+    });
+
+    // One line series per source, so each can be shown/hidden independently
+    // while all of them keep streaming in the background.
+    const series = {};
+    for (const [key, { color }] of Object.entries(SOURCES)) {
+      series[key] = chart.addLineSeries({ color, lineWidth: 2 });
+    }
+
+    // Build the toggle row from the same SOURCES config.
+    const sourcesEl = document.getElementById("sources");
+    for (const [key, { label, color }] of Object.entries(SOURCES)) {
+      const wrapper = document.createElement("label");
+      wrapper.className = "source-toggle";
+      wrapper.style.color = color;
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = true;
+      checkbox.addEventListener("change", () => {
+        series[key].applyOptions({ visible: checkbox.checked });
+      });
+
+      const swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.style.background = color;
+
+      wrapper.appendChild(checkbox);
+      wrapper.appendChild(swatch);
+      wrapper.appendChild(document.createTextNode(label));
+      sourcesEl.appendChild(wrapper);
+    }
+
+    function resizeChart() {
+      chart.resize(document.getElementById("chart").clientWidth, document.getElementById("chart").clientHeight);
+    }
+    window.addEventListener("resize", resizeChart);
+    resizeChart();
+
+    const statusEl = document.getElementById("status");
+
+    function connect() {
+      // Same host/port the page was loaded from, just switched to the ws:// protocol.
+      const ws = new WebSocket(`ws://${window.location.host}/ws/price`);
+
+      ws.onopen = () => {
+        statusEl.textContent = "connected — streaming live";
+        statusEl.className = "connected";
+      };
+
+      ws.onmessage = (event) => {
+        const point = JSON.parse(event.data);
+        const targetSeries = series[point.source];
+        if (!targetSeries) return; // unknown source, ignore
+        // series.update() adds a new point, or overwrites the current one
+        // if "time" matches the last point — that's how live-updating a
+        // chart works with lightweight-charts.
+        targetSeries.update({ time: point.time, value: point.value });
+      };
+
+      ws.onclose = () => {
+        statusEl.textContent = "disconnected — retrying in 2s…";
+        statusEl.className = "disconnected";
+        setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    connect();
+  </script>
+</body>
+</html>
