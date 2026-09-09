@@ -11,7 +11,7 @@ Real-time infrastructure for trading Polymarket's 5-minute BTC Up/Down markets w
 
 Retail access to real high-frequency trading on traditional markets is mostly theoretical, competing at NYSE or NASDAQ means co-locating servers in their data centers, infrastructure realistically only available to funds and institutions, not individuals.
 
-Polymarket is different: its CLOB matching engine is directly, publicly accessible, and (as covered [above](#deployment-note)) genuine low-latency edge access is available to anyone and no institutional relationship is required. Combined with Bitcoin being one of the most liquid, continuously-traded, data-rich assets that exists, Polymarket's 5-minute BTC Up/Down markets are a rare case where an individual can build and run real low-latency trading infrastructure against a live matching engine.
+Polymarket is different: its CLOB matching engine is directly, publicly accessible, and (as covered [below](#deployment-note)) genuine low-latency edge access is available to anyone and no institutional relationship is required. Combined with Bitcoin being one of the most liquid, continuously-traded, data-rich assets that exists, Polymarket's 5-minute BTC Up/Down markets are a rare case where an individual can build and run real low-latency trading infrastructure against a live matching engine.
 
 
 ## What this is
