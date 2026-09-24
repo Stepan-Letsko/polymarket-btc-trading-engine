@@ -82,6 +82,13 @@ def parse_message(raw, token_up, token_down):
 
     parsed = []
     now = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    # Our own receive time (ms) — unlike Binance_ws.py/rtds_ws.py, this
+    # feed's own "timestamp" field only ever gives Polymarket's clock,
+    # never ours. recv_ts is what lets a backtest merge this feed with
+    # the other two using one single, consistent clock (see the
+    # conversation this was added for: avoiding cross-source clock-sync
+    # issues when ordering events from three independent systems).
+    recv_ts = datetime.now(timezone.utc).timestamp() * 1000
 
     for event in events:
         if not isinstance(event, dict):
@@ -97,6 +104,7 @@ def parse_message(raw, token_up, token_down):
             asks_sorted = sorted(asks, key=lambda x: float(x.get("price", 0)))
             parsed.append({
                 "time":       now,
+                "recv_ts":    recv_ts,
                 "event_type": "book",
                 "asset_id":   asset_id,
                 "side":       label_side(asset_id, token_up, token_down),
@@ -116,6 +124,7 @@ def parse_message(raw, token_up, token_down):
                 asset_id = change.get("asset_id", "")
                 parsed.append({
                     "time":       now,
+                    "recv_ts":    recv_ts,
                     "event_type": "price_change",
                     "asset_id":   asset_id,
                     "side":       label_side(asset_id, token_up, token_down),
@@ -133,6 +142,7 @@ def parse_message(raw, token_up, token_down):
             asset_id = event.get("asset_id", "")
             parsed.append({
                 "time":             now,
+                "recv_ts":          recv_ts,
                 "event_type":       "last_trade_price",
                 "asset_id":         asset_id,
                 "side":             label_side(asset_id, token_up, token_down),
@@ -149,6 +159,7 @@ def parse_message(raw, token_up, token_down):
             asset_id = event.get("asset_id", "")
             parsed.append({
                 "time":       now,
+                "recv_ts":    recv_ts,
                 "event_type": "best_bid_ask",
                 "asset_id":   asset_id,
                 "side":       label_side(asset_id, token_up, token_down),
@@ -165,6 +176,7 @@ def parse_message(raw, token_up, token_down):
             asset_id = event.get("asset_id", "")
             parsed.append({
                 "time":          now,
+                "recv_ts":       recv_ts,
                 "event_type":    "tick_size_change",
                 "asset_id":      asset_id,
                 "side":          label_side(asset_id, token_up, token_down),
@@ -177,6 +189,7 @@ def parse_message(raw, token_up, token_down):
         elif event_type == "new_market":
             parsed.append({
                 "time":           now,
+                "recv_ts":        recv_ts,
                 "event_type":     "new_market",
                 "id":             event.get("id"),
                 "question":       event.get("question"),
@@ -193,6 +206,7 @@ def parse_message(raw, token_up, token_down):
         elif event_type == "market_resolved":
             parsed.append({
                 "time":             now,
+                "recv_ts":          recv_ts,
                 "event_type":       "market_resolved",
                 "market":           event.get("market"),
                 "winning_asset_id": event.get("winning_asset_id"),
@@ -203,6 +217,7 @@ def parse_message(raw, token_up, token_down):
         else:
             parsed.append({
                 "time":       now,
+                "recv_ts":    recv_ts,
                 "event_type": f"unknown ({event_type})",
                 "raw":        event,
             })
