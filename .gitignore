@@ -2,6 +2,17 @@ __pycache__/
 *.pyc
 .DS_Store
 data/
+# Ignore everything inside recorder/Data/ (the actual recorded datasets)
+# except .gitkeep, so the empty folder itself still gets created when
+# someone clones the repo. This Mac's filesystem is case-insensitive, so
+# git also matches .gitignore patterns case-insensitively here — meaning
+# the "data/" rule above would otherwise also catch "Data/" and swallow
+# the whole folder before the exceptions below even get a chance to
+# apply. The first line here explicitly re-includes the directory itself
+# to counter that.
+!recorder/Data/
+recorder/Data/*
+!recorder/Data/.gitkeep
 logs/
 *.pem
 .env

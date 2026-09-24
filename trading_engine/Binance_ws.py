@@ -1,7 +1,7 @@
-import asyncio
-import json
-import websockets
-from datetime import datetime, timezone
+import asyncio # asyncio is used to run the async websocket stream
+import json #json to python dict conversion
+import websockets #opens and maintains the websocket connection
+from datetime import datetime, timezone 
 
 # ─────────────────────────────────────────────
 # MESSAGE FILTER
