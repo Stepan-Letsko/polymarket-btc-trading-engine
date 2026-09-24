@@ -440,6 +440,18 @@
       ws.onmessage = (event) => {
         const point = JSON.parse(event.data);
 
+        if (point.type === "history") {
+          // Rebuilds one series from the last ~60s of history — sent
+          // right after connecting, so a fresh load or reload doesn't
+          // start with a blank chart. The backend already collapses
+          // same-second duplicates before sending this, which matters:
+          // setData() (unlike the live update() call below) requires
+          // strictly unique, increasing timestamps or it throws.
+          const targetSeries = series[point.source];
+          if (targetSeries) targetSeries.setData(point.points);
+          return;
+        }
+
         if (point.type === "boundary") {
           setBoundaryPrice(point.value);
           return;

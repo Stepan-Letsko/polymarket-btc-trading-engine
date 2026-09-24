@@ -27,16 +27,39 @@ from indicators import calc_obi, calc_trade_delta      # noqa: E402
 # everyone currently watching.
 connected_clients: set[WebSocket] = set()
 
+# A rolling window of recent ticks per source, so a browser that just
+# connected (fresh load or reload) can have its chart filled in
+# immediately instead of starting blank. Kept to roughly the same span
+# the frontend auto-scrolls to show (WINDOW_SECONDS in index.html), so
+# the history sent matches what the chart would show anyway.
+_recent_ticks: dict[str, list[dict]] = {}
+_RECENT_TICKS_MAX_AGE = 60  # seconds
+
 
 def broadcast(source: str, time_ms: float, price: float) -> None:
-    payload = {
-        "type": "tick",
-        "source": source,
+    point = {
         # lightweight-charts wants whole seconds since 1970, not our
         # millisecond receive timestamp.
         "time": int(time_ms / 1000),
         "value": price,
     }
+
+    points = _recent_ticks.setdefault(source, [])
+    # Collapse same-second updates into one entry (keep the latest)
+    # instead of appending duplicates. lightweight-charts' bulk-load
+    # (setData, used to replay this history) requires strictly unique,
+    # increasing timestamps — unlike the live update() call we use for
+    # normal ticks, which tolerates a repeated timestamp by design. This
+    # is exactly the gap that broke an earlier version of this feature.
+    if points and points[-1]["time"] == point["time"]:
+        points[-1] = point
+    else:
+        points.append(point)
+    cutoff = point["time"] - _RECENT_TICKS_MAX_AGE
+    while points and points[0]["time"] < cutoff:
+        points.pop(0)
+
+    payload = {"type": "tick", "source": source, **point}
     for client in list(connected_clients):
         asyncio.create_task(_safe_send(client, payload))
 
@@ -329,6 +352,12 @@ app = FastAPI(lifespan=lifespan)
 async def price_socket(websocket: WebSocket):
     await websocket.accept()
     connected_clients.add(websocket)
+
+    # Rebuild this client's chart with the last ~60s of history, instead
+    # of leaving it blank until new ticks arrive.
+    for source, points in _recent_ticks.items():
+        if points:
+            await _safe_send(websocket, {"type": "history", "source": source, "points": points})
 
     if _current_boundary_price is not None:
         # Catch this client up immediately, rather than making it wait
