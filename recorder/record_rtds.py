@@ -11,6 +11,7 @@ sys.path.insert(0, ENGINE_DIR)
 DATA_DIRECTORY = os.path.dirname(__file__) + "/Data"
 
 from rtds_ws import stream_rtds
+from reconnect import run_forever
 
 def open_log_file_for(date_str):
     file_name = "rtds_" + date_str + ".jsonl.gz"
@@ -50,7 +51,7 @@ def save_to_file(msg):
     log_file.flush()
 
 try:
-    asyncio.run(stream_rtds(on_message=save_to_file))
+    asyncio.run(run_forever(stream_rtds, save_to_file, name="rtds"))
 except KeyboardInterrupt:
     print("Stopped.")
 finally:

@@ -16,6 +16,7 @@ DATA_DIRECTORY = os.path.dirname(__file__) + "/Data"
 # dashboard/backend.py uses it. We don't have to track the current
 # market ourselves.
 from clob_ws import stream_current_market
+from reconnect import run_forever
 
 def open_log_file_for(date_str):
     file_name = "clob_" + date_str + ".jsonl.gz"
@@ -51,7 +52,7 @@ def save_to_file(msg):
     log_file.flush()
 
 try:
-    asyncio.run(stream_current_market(on_message=save_to_file))
+    asyncio.run(run_forever(stream_current_market, save_to_file, name="clob"))
 except KeyboardInterrupt:
     print("Stopped.")
 finally:

@@ -53,14 +53,31 @@ def load_chainlink_ticks(data_dir, window_start, lookback, lookahead):
         if not os.path.exists(path):
             continue
         with gzip.open(path, "rt") as f:
-            for line in f:
-                msg = json.loads(line)
-                source_ts = msg.get("source_ts")
-                if source_ts is None:
-                    continue
-                ts = source_ts / 1000
-                if range_start <= ts <= range_end:
-                    ticks.append((ts, msg["price"]))
+            try:
+                for line in f:
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        # The very last line can be a partial write caught
+                        # mid-flight if the recorder is still actively
+                        # writing to this file right now — safe to skip.
+                        continue
+                    source_ts = msg.get("source_ts")
+                    if source_ts is None:
+                        continue
+                    ts = source_ts / 1000
+                    if range_start <= ts <= range_end:
+                        ticks.append((ts, msg["price"]))
+            except EOFError:
+                # gzip's "this stream is properly finished" marker only
+                # gets written when the writer calls .close() — if the
+                # recorder is still running (hasn't rotated to a new day
+                # or been stopped), that hasn't happened yet, and reading
+                # hits exactly this once we reach the unfinished end.
+                # Not a corrupted file — just means we've read everything
+                # that's actually been fully written so far, which is all
+                # we can do with a file that's still being appended to.
+                pass
 
     ticks.sort(key=lambda tp: tp[0])
     return ticks

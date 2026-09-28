@@ -16,6 +16,7 @@ sys.path.insert(0, ENGINE_DIR)
 DATA_DIRECTORY = os.path.dirname(__file__) + "/Data"
 
 from Binance_ws import stream_binance
+from reconnect import run_forever
 
 def open_log_file_for(date_str):
     file_name = "binance_" + date_str + ".jsonl.gz"
@@ -48,7 +49,7 @@ def save_to_file(msg):
 
 
 try:
-    asyncio.run(stream_binance(on_message=save_to_file))
+    asyncio.run(run_forever(stream_binance, save_to_file, name="binance"))
 except KeyboardInterrupt:
     print("Stopped.")
 finally:
