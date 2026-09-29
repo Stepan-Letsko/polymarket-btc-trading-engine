@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # 1 = BINANCE price   (BTC/USD price relayed from Binance via Polymarket)
 # 2 = CHAINLINK price (BTC/USD price from Chainlink — this is the resolution oracle)
 
-SHOW_MESSAGE = 0
+SHOW_MESSAGE = 2
 
 
 # ─────────────────────────────────────────────

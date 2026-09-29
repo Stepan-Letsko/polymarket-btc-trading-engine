@@ -4,7 +4,9 @@ import sys
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
+import aiohttp
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
@@ -19,7 +21,6 @@ from Binance_ws import stream_binance                  # noqa: E402
 from Coinbase_ws import stream_coinbase                # noqa: E402
 from rtds_ws import stream_rtds                        # noqa: E402
 from clob_ws import stream_current_market              # noqa: E402
-from twap import compute_twap                          # noqa: E402
 from indicators import calc_obi, calc_trade_delta      # noqa: E402
 
 # Every browser tab that has this page open gets one WebSocket connection
@@ -176,11 +177,21 @@ async def broadcast_indicators_forever() -> None:
 
 
 # Polymarket's BTC Up/Down markets run in fixed 5-minute (300 second)
-# windows. Polymarket resolves each window against a 60-second Chainlink
-# TWAP captured right as the window opens — the actual math for that
-# lives in trading_engine/twap.py, shared with the real trading scripts
-# rather than duplicated here.
+# windows, resolved against a 60-second Chainlink TWAP captured as each
+# window opens ("Price To Beat" / P0). We used to reconstruct that TWAP
+# ourselves from raw Chainlink ticks (trading_engine/twap.py), but found
+# it could be off by $0.19-$1.22 depending on volatility — traced to
+# Polymarket's own Chainlink relay only giving whole-second timestamps,
+# a data-resolution ceiling no amount of our own code could fix.
 #
+# Instead, we now just ask Polymarket's own website for the number it
+# already computed: polymarket.com's frontend calls this same
+# undocumented endpoint to display "Price To Beat" on the page itself
+# (found via the browser's Network tab), so we get their exact value
+# instead of approximating it.
+WINDOW_SECONDS = 300
+CRYPTO_PRICE_URL = "https://polymarket.com/api/crypto/crypto-price"
+
 # This tracks which window's start time we're currently in (not "did we
 # just cross a boundary") — a state comparison rather than an edge
 # trigger. That matters because a feed reconnect can occasionally
@@ -189,14 +200,6 @@ async def broadcast_indicators_forever() -> None:
 # since we're already recorded as being in that window.
 _current_window_start: float | None = None
 
-# Rolling buffer of recent Chainlink ticks — (timestamp_seconds, price) —
-# used to compute the 60s TWAP once a boundary is crossed. Kept slightly
-# longer than the 60s window itself so there's always at least one tick
-# from before the window starts to "carry in" as the window's opening
-# price — see compute_twap()'s docstring in twap.py for why that matters.
-_chainlink_ticks: deque[tuple[float, float]] = deque()
-_TICK_BUFFER_MAX_AGE = 70.0  # seconds
-
 # The boundary broadcast fires exactly once, at the instant a new window
 # opens. If a browser's WebSocket happened to be mid-reconnect at that
 # exact moment, it would simply miss that one message and never see it
@@ -204,6 +207,66 @@ _TICK_BUFFER_MAX_AGE = 70.0  # seconds
 # value here lets us hand it to a client immediately when they connect,
 # instead of only broadcasting it once at the moment it's calculated.
 _current_boundary_price: float | None = None
+
+
+def _iso(ts: float) -> str:
+    # The endpoint wants ISO-8601 UTC timestamps like "2026-09-29T14:30:00Z".
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def _fetch_open_price(session: aiohttp.ClientSession, window_start: float) -> float | None:
+    params = {
+        "symbol": "BTC",
+        "eventStartTime": _iso(window_start),
+        "variant": "fiveminute",
+        "endDate": _iso(window_start + WINDOW_SECONDS),
+        "twapEnabled": "true",
+        "twapLookbackSeconds": "60",
+    }
+    async with session.get(CRYPTO_PRICE_URL, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+        data = await resp.json()
+    return data.get("openPrice")
+
+
+async def track_boundary_price_forever() -> None:
+    """Polls for the current 5-minute window's boundary (window_start),
+    and as soon as a new window opens, fetches its real Price To Beat
+    from Polymarket's own endpoint and broadcasts it. Runs forever."""
+    global _current_window_start, _current_boundary_price
+    # aiohttp defaults to an 8190-byte cap per response header line and
+    # refuses to parse anything longer. Polymarket's response includes a
+    # header (likely a large tracking cookie) just over that, which made
+    # every request fail outright — raise the cap rather than trim
+    # whatever it is we don't control on their end.
+    session_kwargs = {"max_line_size": 32768, "max_field_size": 32768}
+    async with aiohttp.ClientSession(**session_kwargs) as session:
+        while True:
+            now = time.time()
+            window_start = int(now // WINDOW_SECONDS) * WINDOW_SECONDS
+
+            if window_start != _current_window_start:
+                _current_window_start = window_start
+                price = None
+                # Retry a few times — a new window has just opened, so this
+                # is time-sensitive, and a single dropped request shouldn't
+                # mean we go the whole 5 minutes without a Price To Beat.
+                for attempt in range(5):
+                    try:
+                        price = await _fetch_open_price(session, window_start)
+                    except Exception as exc:
+                        print(f"[P0] crypto-price request failed ({exc!r}), retrying...")
+                    if price is not None:
+                        break
+                    await asyncio.sleep(1)
+
+                if price is not None:
+                    _current_boundary_price = price
+                    print(f"[P0] New 5m window opened, Price To Beat (Polymarket API): ${price:,.2f}")
+                    broadcast_boundary(price)
+                else:
+                    print("[P0] Failed to fetch Price To Beat after retries — will try again next tick")
+
+            await asyncio.sleep(1)
 
 
 def on_rtds(msg: dict) -> None:
@@ -227,62 +290,6 @@ def on_rtds(msg: dict) -> None:
         broadcast("binance_relay", msg["recv_ts"], msg["price"])
     elif msg.get("topic") == "crypto_prices_chainlink":
         broadcast("chainlink", msg["recv_ts"], msg["price"])
-        _record_chainlink_tick(msg)
-        _check_boundary(msg)
-
-
-def _record_chainlink_tick(msg: dict) -> None:
-    # source_ts is when Chainlink itself recorded this price — not when
-    # Polymarket's relay forwarded it to us (rtds_ts). The relay delay
-    # between those two isn't constant tick to tick, so weighting by
-    # rtds_ts distorts how long each price is treated as having been in
-    # effect, which directly throws off the TWAP. source_ts is what
-    # Polymarket's own TWAP stream is presumably built from, so that's
-    # what we weight by too.
-    source_ts = msg.get("source_ts")
-    ts = (source_ts / 1000) if source_ts else msg["recv_ts"] / 1000
-    _chainlink_ticks.append((ts, msg["price"]))
-    cutoff = ts - _TICK_BUFFER_MAX_AGE
-    while _chainlink_ticks and _chainlink_ticks[0][0] < cutoff:
-        _chainlink_ticks.popleft()
-
-
-def _check_boundary(msg: dict) -> None:
-    global _current_window_start, _current_boundary_price
-    # rtds_ts (Polymarket's relay send time) drives crossing detection —
-    # it reliably keeps advancing in real time, unlike source_ts
-    # (Chainlink's own clock), which can stall for stretches and caused
-    # P0 to sometimes not get captured at all when tried. The TWAP
-    # calculation itself still weights by source_ts below — that's a
-    # separate, more accuracy-sensitive use of the timestamp.
-    rtds_ts = msg.get("rtds_ts")
-    check_ts = (rtds_ts / 1000) if rtds_ts else msg["recv_ts"] / 1000
-    window_start = int(check_ts // 300) * 300
-
-    if _current_window_start is None:
-        _current_window_start = window_start
-        return
-
-    if window_start != _current_window_start:
-        # We're now in a different window than last time we checked —
-        # this only runs once per real window no matter how many messages
-        # arrive after the crossing, since window_start won't change
-        # again until the next real boundary.
-        _current_window_start = window_start
-
-        # The TWAP window is anchored to this message's own source_ts
-        # (Chainlink's clock), matching how _chainlink_ticks is
-        # timestamped — not check_ts (rtds_ts) above, which is only used
-        # to robustly detect the crossing. Right after a server restart,
-        # the tick buffer may hold less than a full 60s of history —
-        # compute_twap() just averages over whatever it has, which
-        # degrades gracefully rather than failing outright.
-        source_ts = msg.get("source_ts")
-        twap_now = (source_ts / 1000) if source_ts else check_ts
-        twap_price = compute_twap(list(_chainlink_ticks), twap_now - 60, twap_now)
-        _current_boundary_price = twap_price if twap_price is not None else msg["price"]
-        print(f"[P0] New 5m window opened, boundary price (60s TWAP): ${_current_boundary_price:,.2f}")
-        broadcast_boundary(_current_boundary_price)
 
 
 SILENCE_TIMEOUT = 30.0  # seconds with no message before we treat a feed as stuck
@@ -342,6 +349,7 @@ async def lifespan(app: FastAPI):
     for name, stream_fn, on_message in feeds:
         asyncio.create_task(run_forever(name, stream_fn, on_message))
     asyncio.create_task(broadcast_indicators_forever())
+    asyncio.create_task(track_boundary_price_forever())
     yield
 
 
