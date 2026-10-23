@@ -6,4 +6,4 @@ dash>=2.17
 plotly>=5.20
 pandas>=2.2
 sqlalchemy>=2.0
-orjson>=3.10
+duckdb>=1.0
