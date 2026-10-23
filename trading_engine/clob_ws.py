@@ -102,6 +102,15 @@ def parse_message(raw, token_up, token_down):
             asks = event.get("asks", [])
             bids_sorted = sorted(bids, key=lambda x: float(x.get("price", 0)), reverse=True)
             asks_sorted = sorted(asks, key=lambda x: float(x.get("price", 0)))
+            # best_bid/best_ask are picked from the FULL sorted book
+            # (correctness here doesn't depend on how many levels we
+            # keep), but only the top 5 levels of bids/asks themselves
+            # are actually stored — deeper levels add a lot of data
+            # volume (this is what was blowing up memory/time in
+            # process_data.py) for little real signal at this market's
+            # actual trade sizes. See process_data.py's merge step and
+            # the 2026-10 discussion for the reasoning.
+            ORDER_BOOK_DEPTH = 5
             parsed.append({
                 "time":       now,
                 "recv_ts":    recv_ts,
@@ -109,8 +118,8 @@ def parse_message(raw, token_up, token_down):
                 "asset_id":   asset_id,
                 "side":       label_side(asset_id, token_up, token_down),
                 "market":     event.get("market"),
-                "bids":       bids_sorted,
-                "asks":       asks_sorted,
+                "bids":       bids_sorted[:ORDER_BOOK_DEPTH],
+                "asks":       asks_sorted[:ORDER_BOOK_DEPTH],
                 "best_bid":   bids_sorted[0]["price"] if bids_sorted else None,
                 "best_ask":   asks_sorted[0]["price"] if asks_sorted else None,
                 "timestamp":  event.get("timestamp"),
