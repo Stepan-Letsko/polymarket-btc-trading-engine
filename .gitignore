@@ -17,3 +17,4 @@ logs/
 *.pem
 .env
 .vscode/
+trading_engine_cpp/build/
