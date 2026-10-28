@@ -39,9 +39,19 @@ target_link_libraries(binance_ws PRIVATE ixwebsocket)
 target_include_directories(binance_ws PRIVATE third_party/simdjson)
 
 add_executable(get_market
+    src/get_market_main.cpp
     src/get_market.cpp
     third_party/simdjson/simdjson.cpp
 )
 
 target_link_libraries(get_market PRIVATE ixwebsocket)
 target_include_directories(get_market PRIVATE third_party/simdjson)
+
+add_executable(clob_ws
+    src/clob_ws.cpp
+    third_party/simdjson/simdjson.cpp
+    src/get_market.cpp
+)
+
+target_link_libraries(clob_ws PRIVATE ixwebsocket)
+target_include_directories(clob_ws PRIVATE third_party/simdjson)

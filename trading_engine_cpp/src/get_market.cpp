@@ -5,20 +5,21 @@
 #include <iostream>
 #include "get_market.h"
 
-std::string get_current_slug() {
-
+int64_t current_boundary() {
     auto now = std::chrono::system_clock::now();
     int64_t now_secs = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-    int64_t rounded = (now_secs / 300) * 300;  // round down to nearest 5 minutes
-    return "btc-updown-5m-" + std::to_string(rounded);
+    return (now_secs / 300) * 300;  // round down to nearest 5 minutes
 }
 
-Market get_current_market() {
+// static = private to this file. Takes the slug rather than deciding it,
+// so callers can ask for a window other than the one running right now
+// (needed to pre-fetch the upcoming market before its window starts).
+static Market fetch_market(const std::string& slug) {
 
     Market market_result;
 
     ix::HttpClient httpClient;
-    std::string url = "https://gamma-api.polymarket.com/events?slug=" + get_current_slug();
+    std::string url = "https://gamma-api.polymarket.com/events?slug=" + slug;
     auto args = httpClient.createRequest(url);
     ix::HttpResponsePtr response = httpClient.get(url, args);
 
@@ -35,6 +36,9 @@ Market get_current_market() {
     auto event = events.at(0);
     auto markets = event["markets"];
     auto market = markets.at(0);
+
+    std::string_view condition_id = market["conditionId"];
+    market_result.condition_id = std::string(condition_id);
 
     std::string_view clob_token_ids_raw = market["clobTokenIds"];
 
@@ -54,3 +58,10 @@ Market get_current_market() {
     return market_result;
 }
 
+Market get_market_for_boundary(int64_t boundary_ts) {
+    return fetch_market("btc-updown-5m-" + std::to_string(boundary_ts));
+}
+
+Market get_current_market() {
+    return get_market_for_boundary(current_boundary());
+}
