@@ -6,6 +6,23 @@
 #include "simdjson.h"
 #include <mutex>
 #include <atomic>
+#include <csignal>
+#include <algorithm>
+#include <string_view>
+#include "recorder.h"
+
+// Set by the signal handler, read by the main loop. A signal handler may
+// only do async-signal-safe things: setting a lock-free atomic is on that
+// list, taking a mutex or allocating memory is not. The handler is
+// interrupting some thread mid-instruction - if that thread happened to
+// hold the recorder's mutex, calling stop() here would deadlock against
+// itself. So the handler raises a flag and nothing else; the main thread
+// does the actual shutdown in ordinary code.
+std::atomic<bool> g_shutdown{false};
+
+void handle_signal(int) {
+    g_shutdown = true;
+}
 
 // Shared between the main thread and the websocket callback thread.
 // Everything in here changes together at a market rotation, so one
@@ -142,6 +159,30 @@ void handle_event(simdjson::ondemand::value event,
     }
 }
 
+int64_t now_millis() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// Sleep until target_ms, waking every 200ms to notice a shutdown request.
+// Returns false if interrupted, true if we reached the target.
+//
+// Chunked rather than one sleep_for because just after a boundary the wait
+// is nearly five minutes long - Ctrl+C would look like a hang, and a
+// second Ctrl+C kills the process outright, losing the queued records.
+// std::min keeps the final chunk exact, so boundary precision is unchanged.
+bool sleep_until_ms(int64_t target_ms) {
+    while (!g_shutdown) {
+        int64_t remaining = target_ms - now_millis();
+        if (remaining <= 0) {
+            return true;
+        }
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(std::min<int64_t>(remaining, 200)));
+    }
+    return false;
+}
+
 int main() {
 
     ix::WebSocket webSocket; //Creating the websocket
@@ -150,6 +191,14 @@ int main() {
     simdjson::ondemand::parser parser; //Creating the simdjson parser
 
     SharedState state; //Creating the shared state structure
+
+    // Starts the writer thread. Destination is std::cout deliberately:
+    // the Recorder does not decide where records land, so file naming,
+    // rotation and compression are a launch-time choice, e.g.
+    //     ./clob_ws > Data/clob.jsonl
+    //     ./clob_ws | gzip > Data/clob.jsonl.gz
+    // Declared before setOnMessageCallback below, which captures it.
+    Recorder recorder(std::cout);
 
     // Keep retrying rather than starting up with empty tokens - an empty
     // subscription would connect successfully and then sit silent
@@ -171,7 +220,7 @@ int main() {
     }
 
 
-    webSocket.setOnMessageCallback([&webSocket, &state, &parser](const ix::WebSocketMessagePtr & msg) { //Setting the callback function that will be called when a message is received from the websocket server
+    webSocket.setOnMessageCallback([&webSocket, &state, &parser, &recorder](const ix::WebSocketMessagePtr & msg) { //Setting the callback function that will be called when a message is received from the websocket server
         if (msg->type == ix::WebSocketMessageType::Open) { //If the message type is Open, it means the connection has been established
             std::string sub;
             {
@@ -227,9 +276,29 @@ int main() {
             // untouched. Written BEFORE parsing deliberately - capture
             // shouldn't depend on our parser succeeding, so a new or
             // unexpected event type costs a log line, not the data.
-            std::cout << "{\"recv_ts\":" << recv_ts
-                      << ",\"window\":" << cur_window
-                      << ",\"data\":" << msg->str << "}\n";
+            //
+            // Handed to the Recorder as one finished string rather than
+            // streamed piece by piece with <<, because this thread must
+            // not touch I/O - write() only queues it. The writer thread
+            // does the actual output.
+            //
+            // The trailing newline has to be stripped first: the
+            // initial_dump message arrives with one, and splicing it in
+            // raw would break the record across two lines - one line
+            // missing its closing brace, the next a lone "}". That
+            // corrupts the JSONL for every connection and every
+            // reconnect after it.
+            std::string_view payload(msg->str);
+            while (!payload.empty() && (payload.back() == '\n' || payload.back() == '\r')) {
+                payload.remove_suffix(1);
+            }
+
+            std::string record = "{\"recv_ts\":" + std::to_string(recv_ts) +
+                                 ",\"window\":" + std::to_string(cur_window) +
+                                 ",\"data\":";
+            record.append(payload);
+            record += "}\n";
+            recorder.write(std::move(record));
 
             try {
                 simdjson::padded_string padded = simdjson::padded_string(msg->str);
@@ -262,6 +331,13 @@ int main() {
     webSocket.setPingInterval(9); //Setting the ping interval to 9 seconds (this is to keep the connection alive)
     webSocket.start(); //Starting the websocket connection
 
+    // SIGINT is Ctrl+C; SIGTERM is what kill and systemd send, so the same
+    // clean shutdown works when this eventually runs as a service.
+    // SIGKILL (kill -9) cannot be caught by design, and will always lose
+    // whatever is still queued.
+    std::signal(SIGINT, handle_signal);
+    std::signal(SIGTERM, handle_signal);
+
     int64_t current_boundary_ts = current_boundary(); //The 5m window we currently treat as live
     int64_t prefetched_for = 0;  //Which upcoming boundary we've already subscribed to
     Market pending;              //That upcoming window's tokens
@@ -271,7 +347,7 @@ int main() {
     // in the window), sleep exactly until the next thing that needs
     // doing: either the pre-subscribe at boundary-30s, or the boundary
     // itself. The loop wakes up on the event, not on a timer.
-    while (true) {
+    while (!g_shutdown) {
         int64_t next_boundary = current_boundary_ts + 300;        //The window starting after this one
         int64_t prefetch_at_ms = (next_boundary - 30) * 1000;     //When to pre-subscribe
         int64_t boundary_at_ms = next_boundary * 1000;            //When the new window opens
@@ -279,15 +355,13 @@ int main() {
         //Whichever of those two is still ahead of us is what we sleep until.
         int64_t target_ms = (prefetched_for != next_boundary) ? prefetch_at_ms : boundary_at_ms;
 
-        int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-
-        if (target_ms > now_ms) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(target_ms - now_ms));
+        //Interrupted by Ctrl+C - leave now rather than running a rotation
+        //on the way out.
+        if (!sleep_until_ms(target_ms)) {
+            break;
         }
 
-        now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+        int64_t now_ms = now_millis();
 
         // A reconnect happened since we last looked, so the server no
         // longer knows about any pre-subscribe we did. Forget it, and the
@@ -310,7 +384,7 @@ int main() {
                 //pass. Back off first so a persistent failure doesn't spin
                 //hammering the API.
                 std::cerr << "--- prefetch failed, retrying in 3s ---" << std::endl;
-                std::this_thread::sleep_for(std::chrono::seconds(3));
+                sleep_until_ms(now_millis() + 3000);
                 continue;
             }
             pending = fetched;
@@ -335,7 +409,7 @@ int main() {
                     //empty tokens, and retry without advancing the boundary.
                     std::cerr << "--- fetch failed for window " << next_boundary
                               << ", retrying in 3s ---" << std::endl;
-                    std::this_thread::sleep_for(std::chrono::seconds(3));
+                    sleep_until_ms(now_millis() + 3000);
                     continue;
                 }
                 webSocket.send(build_add_subscription(promoted.token_up, promoted.token_down));
@@ -360,6 +434,17 @@ int main() {
         }
     }
 
+    // Stop the websocket FIRST, so no callback can fire while we tear
+    // down. Then returning from main destroys the locals, and the
+    // Recorder's destructor drains the queue and joins the writer thread
+    // - the process does not exit until the last record is written.
+    std::cerr << "--- shutting down ---" << std::endl;
+    webSocket.stop();
+
+    if (recorder.dropped() > 0) {
+        std::cerr << "--- WARNING: dropped " << recorder.dropped()
+                  << " records ---" << std::endl;
+    }
 
     return 0;
 }

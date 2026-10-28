@@ -51,7 +51,23 @@ add_executable(clob_ws
     src/clob_ws.cpp
     third_party/simdjson/simdjson.cpp
     src/get_market.cpp
+    src/recorder.cpp
 )
 
 target_link_libraries(clob_ws PRIVATE ixwebsocket)
 target_include_directories(clob_ws PRIVATE third_party/simdjson)
+
+# The Recorder needs no websocket or JSON library - it only touches the
+# standard library, so this target builds in a second. Threads::Threads is
+# the portable way to ask for thread support: a no-op on macOS, but it adds
+# -pthread on Linux, where omitting it makes std::thread fail at link time.
+find_package(Threads REQUIRED)
+
+add_executable(recorder_test
+    src/recorder_test.cpp
+    src/recorder.cpp
+)
+
+target_link_libraries(recorder_test PRIVATE Threads::Threads)
+
+
