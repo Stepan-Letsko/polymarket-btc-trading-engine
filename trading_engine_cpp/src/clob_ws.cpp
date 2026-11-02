@@ -6,6 +6,8 @@
 #include "simdjson.h"
 #include <mutex>
 #include <atomic>
+#include <algorithm>
+#include <cstdint>
 #include <string_view>
 #include "recorder.h"
 #include "runtime.h" // g_shutdown, install_signal_handlers, now_millis, sleep_until_ms
@@ -145,7 +147,35 @@ void handle_event(simdjson::ondemand::value event,
     }
 }
 
-int main() {
+static void print_usage(const char* program) {
+    std::cerr << "Usage: " << program << " [--verbose]\n"
+              << "  --verbose   print every parsed event to stderr (slow:\n"
+              << "              each print blocks the receiving thread)\n";
+}
+
+// argc/argv: the words typed on the command line - see binance_ws.cpp.
+int main(int argc, char* argv[]) {
+
+    // Off by default: printing every event means a blocking write to the
+    // terminal on the same thread that stamps recv_ts, delaying the
+    // timestamps of every message queued behind it.
+    bool verbose = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg = argv[i];
+        if (arg == "--verbose") {
+            verbose = true;
+        } else if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            // Refuse anything unrecognised rather than ignoring it - a typo
+            // like --verbos would otherwise run silently and look broken.
+            std::cerr << "Unknown option: " << arg << "\n";
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
 
     ix::WebSocket webSocket; //Creating the websocket
     webSocket.setUrl("wss://ws-subscriptions-clob.polymarket.com/ws/market"); //Websocket URL
@@ -182,7 +212,13 @@ int main() {
     }
 
 
-    webSocket.setOnMessageCallback([&webSocket, &state, &parser, &recorder](const ix::WebSocketMessagePtr & msg) { //Setting the callback function that will be called when a message is received from the websocket server
+    // Messages recorded since the last [stats] line. The callback adds 1,
+    // the main thread reads and resets it - two threads, so atomic.
+    std::atomic<uint64_t> msg_count{0};
+
+    // verbose by VALUE (set once, never changes, so a copy is safe);
+    // msg_count by REFERENCE (both threads must share the one counter).
+    webSocket.setOnMessageCallback([&webSocket, &state, &parser, &recorder, &msg_count, verbose](const ix::WebSocketMessagePtr & msg) { //Setting the callback function that will be called when a message is received from the websocket server
         if (msg->type == ix::WebSocketMessageType::Open) { //If the message type is Open, it means the connection has been established
             std::string sub;
             {
@@ -233,6 +269,10 @@ int main() {
                 return;
             }
 
+            // Counted after the filter, so [stats] reports what was actually
+            // recorded - not the upcoming market's warm-up traffic we drop.
+            msg_count++;
+
             // The recorded record: our receive time, which market window
             // it belongs to, and the original message spliced in
             // untouched. Written BEFORE parsing deliberately - capture
@@ -261,6 +301,12 @@ int main() {
             record.append(payload);
             record += "}\n";
             recorder.write(std::move(record));
+
+            // Recording is done. Parsing below only feeds handle_event's
+            // prints, so without --verbose skip it entirely.
+            if (!verbose) {
+                return;
+            }
 
             try {
                 simdjson::padded_string padded = simdjson::padded_string(msg->str);
@@ -301,6 +347,13 @@ int main() {
     int64_t prefetched_for = 0;  //Which upcoming boundary we've already subscribed to
     Market pending;              //That upcoming window's tokens
 
+    // [stats] every 5s, same as binance_ws: a silent terminal still shows
+    // the feed is alive, and "0 msgs" shows when it has quietly died.
+    const int64_t stats_interval_ms = 5000;
+    int64_t last_stats_ms = now_millis();
+    int64_t next_stats_ms = last_stats_ms + stats_interval_ms;
+    uint64_t last_dropped = 0;
+
     // Rather than polling on a fixed interval (which left up to a full
     // second of lag at the boundary - the single most important moment
     // in the window), sleep exactly until the next thing that needs
@@ -311,12 +364,17 @@ int main() {
         int64_t prefetch_at_ms = (next_boundary - 30) * 1000;     //When to pre-subscribe
         int64_t boundary_at_ms = next_boundary * 1000;            //When the new window opens
 
-        //Whichever of those two is still ahead of us is what we sleep until.
+        //Whichever of those two is still ahead of us is the next rotation step.
         int64_t target_ms = (prefetched_for != next_boundary) ? prefetch_at_ms : boundary_at_ms;
 
+        //Sleep until the rotation step OR the next [stats] line, whichever
+        //comes first. Waking early for stats is harmless: both rotation
+        //blocks below check the clock themselves, so if neither is due
+        //yet they do nothing and we fall through to the stats print.
+        //
         //Interrupted by Ctrl+C - leave now rather than running a rotation
         //on the way out.
-        if (!sleep_until_ms(target_ms)) {
+        if (!sleep_until_ms(std::min(target_ms, next_stats_ms))) {
             break;
         }
 
@@ -390,6 +448,35 @@ int main() {
 
             std::cerr << "--- now live on window " << next_boundary << " ---" << std::endl;
             webSocket.send(build_unsubscribe(old_up, old_down));
+        }
+
+        // --- [stats] line ---
+        // Deliberately LAST in the loop: if a boundary and a stats line fall
+        // due together, the rotation runs first, so a slow terminal write
+        // can never delay the market switch.
+        //
+        // The rotation's retry paths above sleep 3s and `continue`, which
+        // can push a stats line late. So the line reports the real elapsed
+        // time rather than assuming exactly 5s, and next_stats_ms skips
+        // ahead past any slots that were missed instead of firing a burst
+        // of catch-up lines.
+        int64_t stats_now_ms = now_millis();
+        if (stats_now_ms >= next_stats_ms) {
+            // exchange(0) reads and resets in one step, so no message
+            // counted between a separate read and reset can be lost.
+            uint64_t recorded = msg_count.exchange(0);
+            uint64_t dropped_total = recorder.dropped();
+            uint64_t dropped_now = dropped_total - last_dropped;
+            last_dropped = dropped_total;
+
+            std::cerr << "[stats] " << recorded << " msgs in last "
+                      << (stats_now_ms - last_stats_ms) / 1000.0 << "s, "
+                      << dropped_now << " dropped" << std::endl;
+
+            last_stats_ms = stats_now_ms;
+            while (next_stats_ms <= stats_now_ms) {
+                next_stats_ms += stats_interval_ms;
+            }
         }
     }
 

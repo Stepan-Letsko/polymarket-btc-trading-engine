@@ -3,12 +3,45 @@
 #include <thread>
 #include <chrono>
 #include <string_view>
+#include <atomic>
+#include <cstdint>
 #include "simdjson.h"
 #include "recorder.h"
-#include "runtime.h" // g_shutdown, install_signal_handlers
+#include "runtime.h" // g_shutdown, install_signal_handlers, now_millis, sleep_until_ms
 
 
-int main (){
+static void print_usage(const char* program) {
+    std::cerr << "Usage: " << program << " [--verbose]\n"
+              << "  --verbose   print every parsed message to stderr (slow:\n"
+              << "              each print blocks the receiving thread)\n";
+}
+
+// argc = how many words were typed, including the program name itself.
+// argv = those words: argv[0] is the program, argv[1] onwards the options.
+//   ./binance_ws --verbose   ->   argc = 2, argv[1] = "--verbose"
+int main (int argc, char* argv[]){
+
+    // Off by default: printing every message means a blocking write to the
+    // terminal on the same thread that stamps recv_ts, delaying the
+    // timestamps of every message queued behind it.
+    bool verbose = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg = argv[i];
+        if (arg == "--verbose") {
+            verbose = true;
+        } else if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            // Refuse anything unrecognised rather than ignoring it - a typo
+            // like --verbos would otherwise run silently and look broken.
+            std::cerr << "Unknown option: " << arg << "\n";
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
     ix::WebSocket webSocket;
 
     webSocket.setUrl("wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@bookTicker/btcusdt@depth5@100ms");
@@ -25,7 +58,19 @@ int main (){
     // Declared before setOnMessageCallback below, which captures it.
     Recorder recorder(std::cout);
 
-    webSocket.setOnMessageCallback([&parser, &recorder](const ix::WebSocketMessagePtr & msg) {
+    // Messages received since the last [stats] line. Two threads touch it:
+    // the callback adds 1 per message, the main thread reads and resets it
+    // every 5s. A plain uint64_t touched by two threads at once is a data
+    // race (the result can be garbage), so it's atomic - same as the
+    // Recorder's dropped_ counter.
+    std::atomic<uint64_t> msg_count{0};
+
+    // verbose is captured by VALUE (no &): the callback runs on IXWebSocket's
+    // thread and gets its own copy. Safe because verbose is set once above
+    // and never changes, so the two threads can never disagree about it.
+    // msg_count is captured by REFERENCE (&): both threads must share the
+    // one counter, not each have a copy.
+    webSocket.setOnMessageCallback([&parser, &recorder, &msg_count, verbose](const ix::WebSocketMessagePtr & msg) {
         if (msg->type == ix::WebSocketMessageType::Message) {
             // Taken first, before any other work in the callback, so it is
             // as close as possible to when the message actually arrived.
@@ -33,6 +78,8 @@ int main (){
             // merged on recv_ts later.
             int64_t recv_ts = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
+
+            msg_count++;
 
             // Strip any trailing newline before splicing the message in -
             // one inside the payload would split the record across two
@@ -56,6 +103,13 @@ int main (){
             record.append(payload);
             record += "}\n";
             recorder.write(std::move(record));
+
+            // Recording is done. Everything below only exists to print the
+            // message, so without --verbose skip it entirely - no parse, no
+            // print, and the thread is straight back to receiving.
+            if (!verbose) {
+                return;
+            }
 
             // Parsing only feeds the debug prints below; the record above is
             // already queued. So a message we fail to understand (a Binance
@@ -138,11 +192,37 @@ int main (){
     webSocket.start();
 
     // All the real work happens on IXWebSocket's thread (the callback) and
-    // the Recorder's writer thread. The main thread only has to stay alive
-    // until asked to stop - so it naps in short 200ms chunks, checking the
-    // flag each time, so Ctrl+C is noticed almost instantly.
-    while (!g_shutdown) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // the Recorder's writer thread. The main thread is otherwise idle, so it
+    // does the one bit of printing that runs by default: a [stats] line
+    // every 5s, so a silent terminal still shows the feed is alive - and
+    // "0 msgs" shows immediately when it has quietly died. Printing here
+    // rather than in the callback keeps the receiving thread free of I/O.
+    //
+    // sleep_until_ms naps in 200ms chunks and returns false on Ctrl+C, so
+    // shutdown stays instant. next_stats_ms advances by a fixed 5000 rather
+    // than "now + 5000", so the time spent printing doesn't make the
+    // interval slowly drift.
+    const int64_t stats_interval_ms = 5000;
+    int64_t next_stats_ms = now_millis() + stats_interval_ms;
+    uint64_t last_dropped = 0;
+
+    while (sleep_until_ms(next_stats_ms)) {
+        // exchange(0) reads the count and resets it in one step. Reading,
+        // then setting to 0 separately, would lose any message the callback
+        // counted in between the two.
+        uint64_t received = msg_count.exchange(0);
+
+        // dropped() is a running total, so report only what's new since
+        // the last line.
+        uint64_t dropped_total = recorder.dropped();
+        uint64_t dropped_now = dropped_total - last_dropped;
+        last_dropped = dropped_total;
+
+        std::cerr << "[stats] " << received << " msgs in last "
+                  << stats_interval_ms / 1000 << "s, "
+                  << dropped_now << " dropped" << std::endl;
+
+        next_stats_ms += stats_interval_ms;
     }
 
     // Stop the websocket FIRST, so no callback can fire while we tear
