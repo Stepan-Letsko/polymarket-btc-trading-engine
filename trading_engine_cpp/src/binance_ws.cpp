@@ -44,7 +44,13 @@ int main (int argc, char* argv[]){
 
     ix::WebSocket webSocket;
 
-    webSocket.setUrl("wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@bookTicker/btcusdt@depth5@100ms");
+    // timeUnit=MICROSECOND makes Binance send aggTrade's E and T in
+    // microseconds (16 digits) instead of the default milliseconds (13
+    // digits) - the same unit as our recv_ts. Milliseconds round away up to
+    // 999us, which hides the ordering of trades within the same ms and adds
+    // up to 1ms of error to every recv_ts - T latency measurement.
+    // bookTicker and depth5 carry no timestamps, so they are unaffected.
+    webSocket.setUrl("wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@bookTicker/btcusdt@depth5@100ms&timeUnit=MICROSECOND");
 
     simdjson::ondemand::parser parser;
 
