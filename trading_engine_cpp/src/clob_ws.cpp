@@ -8,7 +8,9 @@
 #include <atomic>
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include "reconnector.h"
 #include "recorder.h"
 #include "runtime.h" // g_shutdown, install_signal_handlers, now_millis, sleep_until_ms
 
@@ -147,10 +149,14 @@ void handle_event(simdjson::ondemand::value event,
     }
 }
 
+static const char* kDefaultUrl = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
+
 static void print_usage(const char* program) {
-    std::cerr << "Usage: " << program << " [--verbose]\n"
+    std::cerr << "Usage: " << program << " [--verbose] [--url <ws-url>]\n"
               << "  --verbose   print every parsed event to stderr (slow:\n"
-              << "              each print blocks the receiving thread)\n";
+              << "              each print blocks the receiving thread)\n"
+              << "  --url       connect somewhere other than " << kDefaultUrl << "\n"
+              << "              (for testing reconnects against a local server)\n";
 }
 
 // argc/argv: the words typed on the command line - see binance_ws.cpp.
@@ -160,11 +166,21 @@ int main(int argc, char* argv[]) {
     // terminal on the same thread that stamps recv_ts, delaying the
     // timestamps of every message queued behind it.
     bool verbose = false;
+    std::string url = kDefaultUrl;
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
         if (arg == "--verbose") {
             verbose = true;
+        } else if (arg == "--url") {
+            // The next word is the value. i + 1 < argc checks it exists, so
+            // "./clob_ws --url" alone is an error, not a crash.
+            if (i + 1 >= argc) {
+                std::cerr << "--url needs a value\n";
+                print_usage(argv[0]);
+                return 1;
+            }
+            url = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
@@ -178,7 +194,7 @@ int main(int argc, char* argv[]) {
     }
 
     ix::WebSocket webSocket; //Creating the websocket
-    webSocket.setUrl("wss://ws-subscriptions-clob.polymarket.com/ws/market"); //Websocket URL
+    webSocket.setUrl(url); //Websocket URL
 
     simdjson::ondemand::parser parser; //Creating the simdjson parser
 
@@ -216,9 +232,19 @@ int main(int argc, char* argv[]) {
     // the main thread reads and resets it - two threads, so atomic.
     std::atomic<uint64_t> msg_count{0};
 
+    // Reconnect decisions and the silence watchdog (see reconnector.h).
+    // The callback reports to it; the main loop calls poll().
+    //
+    // 30s silence limit, longer than Binance/PolyBolt's 10s: CLOB traffic
+    // depends on trading activity rather than a fixed rate, so it can
+    // legitimately pause for a few seconds. The CLOB has no documented
+    // close codes, so every close is retried with backoff - the default.
+    Reconnector reconnector(webSocket, ReconnectConfig{"clob", 30000});
+
     // verbose by VALUE (set once, never changes, so a copy is safe);
-    // msg_count by REFERENCE (both threads must share the one counter).
-    webSocket.setOnMessageCallback([&webSocket, &state, &parser, &recorder, &msg_count, verbose](const ix::WebSocketMessagePtr & msg) { //Setting the callback function that will be called when a message is received from the websocket server
+    // msg_count and reconnector by REFERENCE (both threads must share the
+    // one object).
+    webSocket.setOnMessageCallback([&webSocket, &state, &parser, &recorder, &msg_count, &reconnector, verbose](const ix::WebSocketMessagePtr & msg) { //Setting the callback function that will be called when a message is received from the websocket server
         if (msg->type == ix::WebSocketMessageType::Open) { //If the message type is Open, it means the connection has been established
             std::string sub;
             {
@@ -242,6 +268,14 @@ int main(int argc, char* argv[]) {
             if (msg->str == "PONG") {
                 return;
             }
+
+            // Fed AFTER the PONG check on purpose: PONG only proves the
+            // server answers our pings, not that market data is flowing - a
+            // connection that pongs but sends no data is exactly what the
+            // watchdog must catch. Fed BEFORE the market filter below, so
+            // the upcoming market's warm-up traffic (received but not
+            // recorded) still counts as the feed being alive.
+            reconnector.on_message();
 
             std::string cur_up, cur_down, cur_market;
             int64_t cur_window;
@@ -330,18 +364,32 @@ int main(int argc, char* argv[]) {
                 std::cerr << "  raw: " << msg->str.substr(0, 300) << std::endl;
             }
 
+        } else if (msg->type == ix::WebSocketMessageType::Close) {
+            std::cerr << "Connection closed: code=" << msg->closeInfo.code
+                      << " reason=" << msg->closeInfo.reason << std::endl;
+            reconnector.on_disconnect(msg->closeInfo.code);
+
         } else if (msg->type == ix::WebSocketMessageType::Error) { //If the message type is Error, it means there was an error with the websocket connection
-            std::cerr << "Error: " << msg->errorInfo.reason << std::endl; // Printing the error message to the console
+            // With automatic reconnection off (the Reconnector turns it
+            // off), an Error means a connect attempt failed - a disconnect
+            // too, with no close code.
+            std::cerr << "Error: " << msg->errorInfo.reason
+                      << " (http status " << msg->errorInfo.http_status << ")" << std::endl;
+            reconnector.on_disconnect(0);
         }
     });
 
     webSocket.setPingMessage("PING", ix::SendMessageKind::Text);
     webSocket.setPingInterval(9); //Setting the ping interval to 9 seconds (this is to keep the connection alive)
-    webSocket.start(); //Starting the websocket connection
 
     // Ctrl+C / SIGTERM now flip g_shutdown instead of killing the process,
     // so the main loop below exits and the Recorder drains. See runtime.h.
+    // Installed BEFORE connecting so there is no moment where messages are
+    // being queued but a Ctrl+C would still kill us outright.
     install_signal_handlers();
+
+    // Starts the first connection (and the watchdog's clock).
+    reconnector.start();
 
     int64_t current_boundary_ts = current_boundary(); //The 5m window we currently treat as live
     int64_t prefetched_for = 0;  //Which upcoming boundary we've already subscribed to
@@ -353,6 +401,7 @@ int main(int argc, char* argv[]) {
     int64_t last_stats_ms = now_millis();
     int64_t next_stats_ms = last_stats_ms + stats_interval_ms;
     uint64_t last_dropped = 0;
+    int exit_code = 0;
 
     // Rather than polling on a fixed interval (which left up to a full
     // second of lag at the boundary - the single most important moment
@@ -367,14 +416,16 @@ int main(int argc, char* argv[]) {
         //Whichever of those two is still ahead of us is the next rotation step.
         int64_t target_ms = (prefetched_for != next_boundary) ? prefetch_at_ms : boundary_at_ms;
 
-        //Sleep until the rotation step OR the next [stats] line, whichever
-        //comes first. Waking early for stats is harmless: both rotation
+        //Sleep until the rotation step, the next [stats] line, or 200ms
+        //from now - whichever comes first. The 200ms cap is so the
+        //Reconnector is polled often enough to act on a disconnect or a
+        //silent feed within 0.2s. Waking early is harmless: both rotation
         //blocks below check the clock themselves, so if neither is due
-        //yet they do nothing and we fall through to the stats print.
+        //yet they do nothing and we fall through.
         //
         //Interrupted by Ctrl+C - leave now rather than running a rotation
         //on the way out.
-        if (!sleep_until_ms(std::min(target_ms, next_stats_ms))) {
+        if (!sleep_until_ms(std::min({target_ms, next_stats_ms, now_millis() + 200}))) {
             break;
         }
 
@@ -450,6 +501,21 @@ int main(int argc, char* argv[]) {
             webSocket.send(build_unsubscribe(old_up, old_down));
         }
 
+        // --- Reconnect decisions and the silence watchdog ---
+        // AFTER the rotation, for the same reason as the stats line below:
+        // at a boundary the market switch runs first. The rotation's 3s
+        // retry paths `continue` past this, which can delay a reconnect by
+        // up to those few seconds - acceptable, and only while Gamma is
+        // already failing.
+        //
+        // false = a fatal close. The CLOB's rule retries every close, so
+        // this can't happen today - but the check keeps it correct if the
+        // rule ever changes.
+        if (!reconnector.poll()) {
+            exit_code = 1;
+            break;
+        }
+
         // --- [stats] line ---
         // Deliberately LAST in the loop: if a boundary and a stats line fall
         // due together, the rotation runs first, so a slow terminal write
@@ -492,5 +558,5 @@ int main(int argc, char* argv[]) {
                   << " records ---" << std::endl;
     }
 
-    return 0;
+    return exit_code;
 }

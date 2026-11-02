@@ -42,6 +42,8 @@ add_executable(binance_ws
     third_party/simdjson/simdjson.cpp
     src/recorder.cpp
     src/runtime.cpp
+    src/backoff.cpp
+    src/reconnector.cpp
 )
 
 target_link_libraries(binance_ws PRIVATE ixwebsocket Threads::Threads)
@@ -62,6 +64,8 @@ add_executable(clob_ws
     src/get_market.cpp
     src/recorder.cpp
     src/runtime.cpp
+    src/backoff.cpp
+    src/reconnector.cpp
 )
 
 target_link_libraries(clob_ws PRIVATE ixwebsocket Threads::Threads)
@@ -72,6 +76,7 @@ add_executable(polybolt_ws
     src/runtime.cpp
     src/recorder.cpp
     src/backoff.cpp
+    src/reconnector.cpp
     third_party/simdjson/simdjson.cpp
 )
 

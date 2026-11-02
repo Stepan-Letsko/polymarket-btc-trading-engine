@@ -23,7 +23,7 @@
 #include <cstdint>
 #include <algorithm>
 #include "simdjson.h"
-#include "backoff.h"
+#include "reconnector.h"
 #include "recorder.h"
 #include "runtime.h" // g_shutdown, install_signal_handlers, now_millis, sleep_until_ms
 
@@ -78,14 +78,8 @@ static void print_usage(const char* program) {
               << "              (for testing reconnects against a local server)\n";
 }
 
-// What the main thread should do about a close, decided from PolyBolt's
-// close code (table in docs/polybolt_subscription.md).
-enum class CloseAction {
-    Fatal,           // retrying can't help - stop the program
-    ServerDraining,  // reconnect once after a random 0-10s
-    Backoff,         // exponential backoff with full jitter
-};
-
+// PolyBolt's own close codes (table in docs/polybolt_subscription.md).
+// Handed to the shared Reconnector, which acts on the answer.
 static CloseAction classify_close(int code) {
     switch (code) {
         case 4001:  // credentials rejected - same credentials fail again
@@ -164,23 +158,21 @@ int main(int argc, char* argv[]) {
     ix::WebSocket webSocket;
     webSocket.setUrl(url);
 
-    // IXWebSocket's own reconnect is off: it reconnects after ANY close
-    // (including 4001, where the same credentials just fail again), with no
-    // jitter. We decide ourselves instead - see the main loop below.
+    // Reconnect decisions and the silence watchdog (see reconnector.h).
+    // The callback reports to it; the main loop calls poll().
     //
-    // With it off, IXWebSocket's thread simply ENDS after a close or a
-    // failed connect. Reconnecting = stop() (which waits for that finished
-    // thread) then start() (a fresh one) - always from the main thread.
-    // Never from the callback: stop() waits for the very thread the
-    // callback runs on, so it would wait for itself forever.
-    webSocket.disableAutomaticReconnection();
-
-    // Callback -> main thread signals. The callback only REPORTS what
-    // happened; the main thread makes every decision. All atomic because
-    // two threads touch them.
-    std::atomic<bool> disconnected{false};   // a close or failed connect happened
-    std::atomic<int>  last_close_code{0};    // its close code (0 = failed connect, no code)
-    std::atomic<int64_t> authed_at_ms{0};    // when this connection logged in (0 = not yet)
+    // 10s silence limit: both channels send one update per second, so 10s
+    // of nothing is 20 missed messages - clearly broken, not quiet.
+    //
+    // healthy_on_first_message = false: a PolyBolt connection only counts
+    // as working once logged in (an error ack is a message too). The
+    // callback calls on_healthy() on "authed" instead.
+    Reconnector reconnector(webSocket, ReconnectConfig{
+        "polybolt",
+        10000,
+        classify_close,
+        false,
+    });
 
     // Only ever used on IXWebSocket's thread (inside the callback), so it
     // needs no locking.
@@ -201,8 +193,7 @@ int main(int argc, char* argv[]) {
     // verbose by VALUE (set once, never changes, so a copy is safe);
     // everything else by REFERENCE (shared with main).
     webSocket.setOnMessageCallback([&webSocket, &auth_frame, &parser, &recorder, &msg_count,
-                                    &disconnected, &last_close_code, &authed_at_ms,
-                                    verbose](const ix::WebSocketMessagePtr& msg) {
+                                    &reconnector, verbose](const ix::WebSocketMessagePtr& msg) {
         if (msg->type == ix::WebSocketMessageType::Open) {
             // Every connection starts unauthenticated, so auth is sent on
             // every open - the first one and any reconnect alike.
@@ -217,6 +208,7 @@ int main(int argc, char* argv[]) {
                 std::chrono::system_clock::now().time_since_epoch()).count();
 
             msg_count++;
+            reconnector.on_message();  // feeds the silence watchdog
 
             // Strip any trailing newline before splicing the message in -
             // one inside the payload would split the record across two
@@ -267,9 +259,9 @@ int main(int argc, char* argv[]) {
                     if (op == "authed") {
                         std::cerr << "Authenticated, subscribing..." << std::endl;
                         webSocket.send(kSubscribeFrame);
-                        // Tells the main thread this connection works, so
-                        // it can reset the backoff once it has stayed up.
-                        authed_at_ms = now_millis();
+                        // This connection works - the Reconnector resets
+                        // the backoff once it has stayed up for 30s.
+                        reconnector.on_healthy();
                     } else if (op == "error") {
                         // Always shown, verbose or not: an error ack (e.g.
                         // auth_invalid) means we're not getting data, and
@@ -288,10 +280,7 @@ int main(int argc, char* argv[]) {
             // violation, etc. (table in docs/polybolt_subscription.md).
             std::cerr << "Connection closed: code=" << msg->closeInfo.code
                       << " reason=" << msg->closeInfo.reason << std::endl;
-            // Code stored BEFORE the flag is raised, so when the main thread
-            // sees the flag, the matching code is already there.
-            last_close_code = msg->closeInfo.code;
-            disconnected = true;
+            reconnector.on_disconnect(msg->closeInfo.code);
 
         } else if (msg->type == ix::WebSocketMessageType::Error) {
             // With automatic reconnection off, an Error here means a connect
@@ -301,8 +290,7 @@ int main(int argc, char* argv[]) {
             // handshake, e.g. 429 (too many requests) or 503 (unavailable).
             std::cerr << "Error: " << msg->errorInfo.reason
                       << " (http status " << msg->errorInfo.http_status << ")" << std::endl;
-            last_close_code = 0;
-            disconnected = true;
+            reconnector.on_disconnect(0);
         }
     });
 
@@ -310,88 +298,30 @@ int main(int argc, char* argv[]) {
     // Installed BEFORE start() so there is no moment where messages are
     // being queued but a Ctrl+C would still kill us outright.
     install_signal_handlers();
-    webSocket.start();
+    reconnector.start();
 
-    // The main thread does two jobs: the [stats] line every 5s (as in
-    // binance_ws - expect ~10 msgs per line here, one live update per
-    // second on each channel), and every reconnect decision.
+    // The main thread does two jobs: every reconnect decision (through
+    // reconnector.poll()), and the [stats] line every 5s (as in binance_ws -
+    // expect ~10 msgs per line here, one live update per second on each
+    // channel).
     //
-    // It wakes at least every 200ms, so a disconnect is noticed within
-    // 0.2s rather than at the next stats line. sleep_until_ms returns false
-    // on Ctrl+C, so shutdown stays instant.
+    // It wakes at least every 200ms, so a disconnect or a silent feed is
+    // acted on within 0.2s. sleep_until_ms returns false on Ctrl+C, so
+    // shutdown stays instant.
     const int64_t stats_interval_ms = 5000;
     int64_t next_stats_ms = now_millis() + stats_interval_ms;
     uint64_t last_dropped = 0;
-
-    // Only reset the backoff after a connection has stayed up this long
-    // after logging in. Resetting the moment we log in would let a server
-    // that accepts us and then immediately drops us get retried at full
-    // speed forever - the backoff would never grow.
-    const int64_t stable_after_ms = 30000;
-
-    Backoff backoff;                 // 1s base, 30s cap, full jitter
-    bool reconnect_pending = false;  // a reconnect is scheduled...
-    int64_t reconnect_at_ms = 0;     // ...for this time
     int exit_code = 0;
 
-    while (sleep_until_ms(std::min({next_stats_ms,
-                                    reconnect_pending ? reconnect_at_ms : next_stats_ms,
-                                    now_millis() + 200}))) {
-        int64_t now_ms = now_millis();
-
-        // --- A disconnect happened: decide what to do ---
-        // exchange(false) reads and clears the flag in one step. It's
-        // cleared even while a reconnect is already scheduled, so a
-        // second report of the same drop can't schedule a second reconnect.
-        if (disconnected.exchange(false) && !reconnect_pending) {
-            int code = last_close_code;
-            authed_at_ms = 0;  // this connection is gone
-
-            CloseAction action = classify_close(code);
-            if (action == CloseAction::Fatal) {
-                std::cerr << "--- FATAL: close code " << code
-                          << " - retrying can't fix this (see docs/polybolt_subscription.md),"
-                          << " stopping ---" << std::endl;
-                exit_code = 1;
-                break;
-            }
-
-            int64_t delay_ms = (action == CloseAction::ServerDraining)
-                ? backoff.random_delay_ms(10000)
-                : backoff.next_delay_ms();
-
-            reconnect_pending = true;
-            reconnect_at_ms = now_ms + delay_ms;
-            std::cerr << "--- reconnecting in " << delay_ms / 1000.0 << "s"
-                      << " (close code " << code << ", ";
-            if (action == CloseAction::ServerDraining) {
-                std::cerr << "server draining: random 0-10s";
-            } else {
-                std::cerr << "backoff attempt " << backoff.attempt();
-            }
-            std::cerr << ") ---" << std::endl;
-        }
-
-        // --- Scheduled reconnect is due ---
-        if (reconnect_pending && now_ms >= reconnect_at_ms) {
-            reconnect_pending = false;
-            std::cerr << "--- reconnecting now ---" << std::endl;
-            // stop() waits for IXWebSocket's finished thread, start() makes
-            // a fresh one. The Open callback then re-sends auth, and authed
-            // re-sends the subscribe - nothing else needs redoing here.
-            webSocket.stop();
-            webSocket.start();
-        }
-
-        // --- Connection has been healthy for a while: reset the backoff ---
-        int64_t authed_at = authed_at_ms;
-        if (backoff.attempt() > 0 && authed_at > 0 && now_ms - authed_at >= stable_after_ms) {
-            std::cerr << "--- connection stable, backoff reset ---" << std::endl;
-            backoff.reset();
+    while (sleep_until_ms(std::min(next_stats_ms, now_millis() + 200))) {
+        // false = a fatal close (e.g. 4001 bad credentials): stop.
+        if (!reconnector.poll()) {
+            exit_code = 1;
+            break;
         }
 
         // --- [stats] line ---
-        if (now_ms >= next_stats_ms) {
+        if (now_millis() >= next_stats_ms) {
             // exchange(0) reads and resets in one step, so no message
             // counted between a separate read and reset can be lost.
             uint64_t received = msg_count.exchange(0);

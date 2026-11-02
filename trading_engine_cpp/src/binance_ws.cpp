@@ -2,18 +2,32 @@
 #include <ixwebsocket/IXWebSocket.h>
 #include <thread>
 #include <chrono>
+#include <string>
 #include <string_view>
 #include <atomic>
 #include <cstdint>
+#include <algorithm>
 #include "simdjson.h"
+#include "reconnector.h"
 #include "recorder.h"
 #include "runtime.h" // g_shutdown, install_signal_handlers, now_millis, sleep_until_ms
 
 
+// timeUnit=MICROSECOND makes Binance send aggTrade's E and T in
+// microseconds (16 digits) instead of the default milliseconds (13
+// digits) - the same unit as our recv_ts. Milliseconds round away up to
+// 999us, which hides the ordering of trades within the same ms and adds
+// up to 1ms of error to every recv_ts - T latency measurement.
+// bookTicker and depth5 carry no timestamps, so they are unaffected.
+static const char* kDefaultUrl =
+    "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@bookTicker/btcusdt@depth5@100ms&timeUnit=MICROSECOND";
+
 static void print_usage(const char* program) {
-    std::cerr << "Usage: " << program << " [--verbose]\n"
+    std::cerr << "Usage: " << program << " [--verbose] [--url <ws-url>]\n"
               << "  --verbose   print every parsed message to stderr (slow:\n"
-              << "              each print blocks the receiving thread)\n";
+              << "              each print blocks the receiving thread)\n"
+              << "  --url       connect somewhere other than Binance\n"
+              << "              (for testing reconnects against a local server)\n";
 }
 
 // argc = how many words were typed, including the program name itself.
@@ -25,11 +39,21 @@ int main (int argc, char* argv[]){
     // terminal on the same thread that stamps recv_ts, delaying the
     // timestamps of every message queued behind it.
     bool verbose = false;
+    std::string url = kDefaultUrl;
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
         if (arg == "--verbose") {
             verbose = true;
+        } else if (arg == "--url") {
+            // The next word is the value. i + 1 < argc checks it exists, so
+            // "./binance_ws --url" alone is an error, not a crash.
+            if (i + 1 >= argc) {
+                std::cerr << "--url needs a value\n";
+                print_usage(argv[0]);
+                return 1;
+            }
+            url = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
@@ -43,14 +67,7 @@ int main (int argc, char* argv[]){
     }
 
     ix::WebSocket webSocket;
-
-    // timeUnit=MICROSECOND makes Binance send aggTrade's E and T in
-    // microseconds (16 digits) instead of the default milliseconds (13
-    // digits) - the same unit as our recv_ts. Milliseconds round away up to
-    // 999us, which hides the ordering of trades within the same ms and adds
-    // up to 1ms of error to every recv_ts - T latency measurement.
-    // bookTicker and depth5 carry no timestamps, so they are unaffected.
-    webSocket.setUrl("wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@bookTicker/btcusdt@depth5@100ms&timeUnit=MICROSECOND");
+    webSocket.setUrl(url);
 
     simdjson::ondemand::parser parser;
 
@@ -71,12 +88,22 @@ int main (int argc, char* argv[]){
     // Recorder's dropped_ counter.
     std::atomic<uint64_t> msg_count{0};
 
+    // Reconnect decisions and the silence watchdog (see reconnector.h).
+    // The callback reports to it; the main loop calls poll().
+    //
+    // 10s silence limit: depth5 alone sends 10 messages a second and the
+    // whole stream normally runs at 100+/s, so 10s of nothing is clearly a
+    // dead feed, not a quiet market. Binance has no special close codes
+    // (it also disconnects everyone every 24h with a normal close), so
+    // every close is simply retried with backoff - the default rule.
+    Reconnector reconnector(webSocket, ReconnectConfig{"binance", 10000});
+
     // verbose is captured by VALUE (no &): the callback runs on IXWebSocket's
     // thread and gets its own copy. Safe because verbose is set once above
     // and never changes, so the two threads can never disagree about it.
-    // msg_count is captured by REFERENCE (&): both threads must share the
-    // one counter, not each have a copy.
-    webSocket.setOnMessageCallback([&parser, &recorder, &msg_count, verbose](const ix::WebSocketMessagePtr & msg) {
+    // msg_count and reconnector are captured by REFERENCE (&): both threads
+    // must share the one object, not each have a copy.
+    webSocket.setOnMessageCallback([&parser, &recorder, &msg_count, &reconnector, verbose](const ix::WebSocketMessagePtr & msg) {
         if (msg->type == ix::WebSocketMessageType::Message) {
             // Taken first, before any other work in the callback, so it is
             // as close as possible to when the message actually arrived.
@@ -86,6 +113,7 @@ int main (int argc, char* argv[]){
                 std::chrono::system_clock::now().time_since_epoch()).count();
 
             msg_count++;
+            reconnector.on_message();  // feeds the silence watchdog
 
             // Strip any trailing newline before splicing the message in -
             // one inside the payload would split the record across two
@@ -174,20 +202,29 @@ int main (int argc, char* argv[]){
 
         } else if (msg->type == ix::WebSocketMessageType::Open) {
             std::cerr << "Connection opened" << std::endl;
+
+        } else if (msg->type == ix::WebSocketMessageType::Close) {
+            std::cerr << "Connection closed: code=" << msg->closeInfo.code
+                      << " reason=" << msg->closeInfo.reason << std::endl;
+            reconnector.on_disconnect(msg->closeInfo.code);
+
         } else if (msg->type == ix::WebSocketMessageType::Error) {
-            std::cerr << "Error: " << msg->errorInfo.reason << std::endl;
+            // With automatic reconnection off (the Reconnector turns it
+            // off), an Error means a connect attempt failed - a disconnect
+            // too, with no close code. http_status is set when Binance
+            // refused the handshake, e.g. 429 (rate limited) or 418 (IP
+            // temporarily banned for ignoring 429s).
+            std::cerr << "Error: " << msg->errorInfo.reason
+                      << " (http status " << msg->errorInfo.http_status << ")" << std::endl;
+            reconnector.on_disconnect(0);
         }
     });
 
-    // IXWebSocket already auto-reconnects on a hard drop/error by
-    // default (_automaticReconnection is true out of the box). But it
-    // does NOT actively check the connection is still alive otherwise
-    // (default ping interval is -1, i.e. off) — without this, a
-    // connection that silently goes stale (still "open", but no longer
-    // delivering data, same failure mode we hit in the Python recorder)
-    // would never trigger a reconnect on its own. Sending our own PING
-    // every 30s gives it something to notice when the connection has
-    // actually died.
+    // Our own PING every 30s. Without it, a connection whose network path
+    // has died (no close, no error) is never noticed at the TCP level -
+    // IXWebSocket closes the connection when a ping goes unanswered, and
+    // that close reaches the Reconnector like any other. The silence
+    // watchdog covers the other case: connection fine, data stopped.
     webSocket.setPingInterval(30);
 
     // Ctrl+C / SIGTERM now flip g_shutdown instead of killing the process.
@@ -195,40 +232,52 @@ int main (int argc, char* argv[]){
     // being queued but a Ctrl+C would still kill us outright.
     install_signal_handlers();
 
-    webSocket.start();
+    reconnector.start();
 
     // All the real work happens on IXWebSocket's thread (the callback) and
-    // the Recorder's writer thread. The main thread is otherwise idle, so it
-    // does the one bit of printing that runs by default: a [stats] line
-    // every 5s, so a silent terminal still shows the feed is alive - and
-    // "0 msgs" shows immediately when it has quietly died. Printing here
-    // rather than in the callback keeps the receiving thread free of I/O.
+    // the Recorder's writer thread. The main thread does two jobs: every
+    // reconnect decision (through reconnector.poll()), and the one bit of
+    // printing that runs by default - a [stats] line every 5s, so a silent
+    // terminal still shows the feed is alive. Printing here rather than in
+    // the callback keeps the receiving thread free of I/O.
     //
-    // sleep_until_ms naps in 200ms chunks and returns false on Ctrl+C, so
+    // It wakes at least every 200ms, so a disconnect or a silent feed is
+    // acted on within 0.2s. sleep_until_ms returns false on Ctrl+C, so
     // shutdown stays instant. next_stats_ms advances by a fixed 5000 rather
     // than "now + 5000", so the time spent printing doesn't make the
     // interval slowly drift.
     const int64_t stats_interval_ms = 5000;
     int64_t next_stats_ms = now_millis() + stats_interval_ms;
     uint64_t last_dropped = 0;
+    int exit_code = 0;
 
-    while (sleep_until_ms(next_stats_ms)) {
-        // exchange(0) reads the count and resets it in one step. Reading,
-        // then setting to 0 separately, would lose any message the callback
-        // counted in between the two.
-        uint64_t received = msg_count.exchange(0);
+    while (sleep_until_ms(std::min(next_stats_ms, now_millis() + 200))) {
+        // false = a fatal close. Binance's rule retries every close, so
+        // this can't happen today - but the check keeps it correct if the
+        // rule ever changes.
+        if (!reconnector.poll()) {
+            exit_code = 1;
+            break;
+        }
 
-        // dropped() is a running total, so report only what's new since
-        // the last line.
-        uint64_t dropped_total = recorder.dropped();
-        uint64_t dropped_now = dropped_total - last_dropped;
-        last_dropped = dropped_total;
+        if (now_millis() >= next_stats_ms) {
+            // exchange(0) reads the count and resets it in one step.
+            // Reading, then setting to 0 separately, would lose any message
+            // the callback counted in between the two.
+            uint64_t received = msg_count.exchange(0);
 
-        std::cerr << "[stats] " << received << " msgs in last "
-                  << stats_interval_ms / 1000 << "s, "
-                  << dropped_now << " dropped" << std::endl;
+            // dropped() is a running total, so report only what's new
+            // since the last line.
+            uint64_t dropped_total = recorder.dropped();
+            uint64_t dropped_now = dropped_total - last_dropped;
+            last_dropped = dropped_total;
 
-        next_stats_ms += stats_interval_ms;
+            std::cerr << "[stats] " << received << " msgs in last "
+                      << stats_interval_ms / 1000 << "s, "
+                      << dropped_now << " dropped" << std::endl;
+
+            next_stats_ms += stats_interval_ms;
+        }
     }
 
     // Stop the websocket FIRST, so no callback can fire while we tear
@@ -243,5 +292,5 @@ int main (int argc, char* argv[]){
                   << " records ---" << std::endl;
     }
 
-    return 0;
+    return exit_code;
 }
