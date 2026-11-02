@@ -67,6 +67,17 @@ add_executable(clob_ws
 target_link_libraries(clob_ws PRIVATE ixwebsocket Threads::Threads)
 target_include_directories(clob_ws PRIVATE third_party/simdjson)
 
+add_executable(polybolt_ws
+    src/polybolt_ws.cpp
+    src/runtime.cpp
+    src/recorder.cpp
+    src/backoff.cpp
+    third_party/simdjson/simdjson.cpp
+)
+
+target_link_libraries(polybolt_ws PRIVATE ixwebsocket Threads::Threads)
+target_include_directories(polybolt_ws PRIVATE third_party/simdjson)
+
 # The Recorder needs no websocket or JSON library - it only touches the
 # standard library, so this target builds in a second.
 
@@ -76,5 +87,11 @@ add_executable(recorder_test
 )
 
 target_link_libraries(recorder_test PRIVATE Threads::Threads)
+
+# Backoff is pure standard-library maths - no threads, network or JSON.
+add_executable(backoff_test
+    src/backoff_test.cpp
+    src/backoff.cpp
+)
 
 

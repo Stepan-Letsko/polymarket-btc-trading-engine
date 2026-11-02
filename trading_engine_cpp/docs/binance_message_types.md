@@ -4,6 +4,15 @@ Notes on the raw JSON messages received from Binance's combined websocket
 stream (`btcusdt@aggTrade/btcusdt@bookTicker/btcusdt@depth5@100ms`), based
 on real captured output from `binance_ws.cpp`.
 
+## Time unit: microseconds
+
+`binance_ws.cpp` connects with `&timeUnit=MICROSECOND` on the URL, so every
+Binance timestamp (`E` and `T` in `aggTrade`) is in **epoch microseconds**
+(16 digits, e.g. `1793631751700782`), the same unit as our own `recv_ts`.
+Without that parameter Binance defaults to milliseconds (13 digits), which
+rounds away up to 999µs. Recordings made before this change (2026-11-02)
+have millisecond `E`/`T`.
+
 ## Shared wrapper (all three types)
 
 ```json
@@ -53,11 +62,11 @@ far more frequently than `depth5`.
 ## 3. `aggTrade` — Aggregate Trade
 
 ```json
-{"e":"aggTrade","E":1792425993275,"s":"BTCUSDT","a":4093315342,"p":"81858.01000000","q":"0.01306000","f":6775272958,"l":6775273003,"T":1792425993275,"m":false,"M":true}
+{"e":"aggTrade","E":1793631751700782,"s":"BTCUSDT","a":4104666885,"p":"77802.00000000","q":"0.00034000","f":6812058797,"l":6812058797,"T":1793631751700534,"m":true,"M":true}
 ```
 - `e` — event type, always `"aggTrade"` for this stream.
 - `E` — **event time**: when Binance's server generated this event
-  (epoch ms). The one genuine "true origin timestamp" field among these
+  (epoch µs). The one genuine "true origin timestamp" field among these
   three stream types — `depth5` and `bookTicker` have no equivalent.
 - `s` — symbol.
 - `a` — the aggregate trade's own ID.
@@ -68,8 +77,10 @@ far more frequently than `depth5`.
   individual fills at the same price, from the same taker order, into
   one event — `f`/`l` give the range of raw trade IDs bundled together.
 - `T` — **trade time**: when the trade executed on Binance's matching
-  engine (epoch ms) — subtly different from `E` (when the event was
-  generated), though usually very close or identical.
+  engine (epoch µs) — subtly different from `E` (when the event was
+  generated). In milliseconds the two usually looked identical; in
+  microseconds `E` is typically a few hundred µs after `T` (248µs in the
+  example above) — the time Binance takes to publish the trade.
 - `m` — "is the buyer the market maker?" If `true`, the buy order was
   already resting on the book, and the *sell* side triggered the trade
   (the "taker"). If `false`, the buyer was the taker.
