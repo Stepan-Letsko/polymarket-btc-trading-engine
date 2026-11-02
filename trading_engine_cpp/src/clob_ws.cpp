@@ -6,23 +6,9 @@
 #include "simdjson.h"
 #include <mutex>
 #include <atomic>
-#include <csignal>
-#include <algorithm>
 #include <string_view>
 #include "recorder.h"
-
-// Set by the signal handler, read by the main loop. A signal handler may
-// only do async-signal-safe things: setting a lock-free atomic is on that
-// list, taking a mutex or allocating memory is not. The handler is
-// interrupting some thread mid-instruction - if that thread happened to
-// hold the recorder's mutex, calling stop() here would deadlock against
-// itself. So the handler raises a flag and nothing else; the main thread
-// does the actual shutdown in ordinary code.
-std::atomic<bool> g_shutdown{false};
-
-void handle_signal(int) {
-    g_shutdown = true;
-}
+#include "runtime.h" // g_shutdown, install_signal_handlers, now_millis, sleep_until_ms
 
 // Shared between the main thread and the websocket callback thread.
 // Everything in here changes together at a market rotation, so one
@@ -157,30 +143,6 @@ void handle_event(simdjson::ondemand::value event,
     } else {
         std::cerr << "[unknown event_type] " << event_type << "\n";
     }
-}
-
-int64_t now_millis() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
-// Sleep until target_ms, waking every 200ms to notice a shutdown request.
-// Returns false if interrupted, true if we reached the target.
-//
-// Chunked rather than one sleep_for because just after a boundary the wait
-// is nearly five minutes long - Ctrl+C would look like a hang, and a
-// second Ctrl+C kills the process outright, losing the queued records.
-// std::min keeps the final chunk exact, so boundary precision is unchanged.
-bool sleep_until_ms(int64_t target_ms) {
-    while (!g_shutdown) {
-        int64_t remaining = target_ms - now_millis();
-        if (remaining <= 0) {
-            return true;
-        }
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(std::min<int64_t>(remaining, 200)));
-    }
-    return false;
 }
 
 int main() {
@@ -331,12 +293,9 @@ int main() {
     webSocket.setPingInterval(9); //Setting the ping interval to 9 seconds (this is to keep the connection alive)
     webSocket.start(); //Starting the websocket connection
 
-    // SIGINT is Ctrl+C; SIGTERM is what kill and systemd send, so the same
-    // clean shutdown works when this eventually runs as a service.
-    // SIGKILL (kill -9) cannot be caught by design, and will always lose
-    // whatever is still queued.
-    std::signal(SIGINT, handle_signal);
-    std::signal(SIGTERM, handle_signal);
+    // Ctrl+C / SIGTERM now flip g_shutdown instead of killing the process,
+    // so the main loop below exits and the Recorder drains. See runtime.h.
+    install_signal_handlers();
 
     int64_t current_boundary_ts = current_boundary(); //The 5m window we currently treat as live
     int64_t prefetched_for = 0;  //Which upcoming boundary we've already subscribed to

@@ -22,6 +22,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(ixwebsocket)
 
+# Threads::Threads is the portable way to ask for thread support: a no-op
+# on macOS, but it adds -pthread on Linux, where omitting it makes
+# std::thread fail at link time. Found up here, before any target, because
+# CMake reads top to bottom and every target that uses the Recorder (which
+# starts a std::thread) needs it.
+find_package(Threads REQUIRED)
+
 add_executable(main
     src/main.cpp
     third_party/simdjson/simdjson.cpp
@@ -33,9 +40,11 @@ target_link_libraries(main PRIVATE ixwebsocket)
 add_executable(binance_ws
     src/binance_ws.cpp
     third_party/simdjson/simdjson.cpp
+    src/recorder.cpp
+    src/runtime.cpp
 )
 
-target_link_libraries(binance_ws PRIVATE ixwebsocket)
+target_link_libraries(binance_ws PRIVATE ixwebsocket Threads::Threads)
 target_include_directories(binance_ws PRIVATE third_party/simdjson)
 
 add_executable(get_market
@@ -52,16 +61,14 @@ add_executable(clob_ws
     third_party/simdjson/simdjson.cpp
     src/get_market.cpp
     src/recorder.cpp
+    src/runtime.cpp
 )
 
-target_link_libraries(clob_ws PRIVATE ixwebsocket)
+target_link_libraries(clob_ws PRIVATE ixwebsocket Threads::Threads)
 target_include_directories(clob_ws PRIVATE third_party/simdjson)
 
 # The Recorder needs no websocket or JSON library - it only touches the
-# standard library, so this target builds in a second. Threads::Threads is
-# the portable way to ask for thread support: a no-op on macOS, but it adds
-# -pthread on Linux, where omitting it makes std::thread fail at link time.
-find_package(Threads REQUIRED)
+# standard library, so this target builds in a second.
 
 add_executable(recorder_test
     src/recorder_test.cpp
