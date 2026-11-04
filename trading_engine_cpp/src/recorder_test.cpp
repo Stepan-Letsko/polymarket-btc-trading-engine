@@ -49,13 +49,13 @@ static void test_nothing_is_lost() {
 
     std::ostringstream out;
     {
-        Recorder recorder(out);
+        Recorder recorder(std::make_unique<StreamSink>(out));
 
         std::vector<std::thread> writers;
         for (int t = 0; t < thread_count; ++t) {
             writers.emplace_back([&recorder, t] {
                 for (int i = 0; i < per_thread; ++i) {
-                    recorder.write("t" + std::to_string(t) + "-" + std::to_string(i) + "\n");
+                    recorder.write(0, "t" + std::to_string(t) + "-" + std::to_string(i) + "\n");
                 }
             });
         }
@@ -82,9 +82,9 @@ static void test_destructor_drains() {
     const size_t count = 500;
     std::ostringstream out;
     {
-        Recorder recorder(out);
+        Recorder recorder(std::make_unique<StreamSink>(out));
         for (size_t i = 0; i < count; ++i) {
-            recorder.write("line\n");
+            recorder.write(0, "line\n");
         }
     }
 
@@ -99,8 +99,8 @@ static void test_stop_is_repeatable() {
 
     std::ostringstream out;
     {
-        Recorder recorder(out);
-        recorder.write("one\n");
+        Recorder recorder(std::make_unique<StreamSink>(out));
+        recorder.write(0, "one\n");
         recorder.stop();
         recorder.stop();
         recorder.stop();
@@ -118,9 +118,9 @@ static void test_bounded_queue_accounting() {
     std::ostringstream out;
     uint64_t dropped = 0;
     {
-        Recorder recorder(out, 16);
+        Recorder recorder(std::make_unique<StreamSink>(out), 16);
         for (size_t i = 0; i < total; ++i) {
-            recorder.write("x\n");
+            recorder.write(0, "x\n");
         }
         recorder.stop();
         dropped = recorder.dropped();
@@ -132,11 +132,55 @@ static void test_bounded_queue_accounting() {
     check(written + dropped == total, "written + dropped == submitted");
 }
 
+// Stands in for a sink with a disk problem: refuses every second record.
+class FlakySink : public Sink {
+public:
+    explicit FlakySink(std::ostream& out) : out_(out) {}
+    bool write(const Record& record) override {
+        if (++calls_ % 2 == 0) {
+            return false;
+        }
+        out_ << record.line;
+        return true;
+    }
+    uint64_t flush() override {
+        out_.flush();
+        return 0;
+    }
+
+private:
+    std::ostream& out_;
+    uint64_t calls_ = 0;
+};
+
+// A record the sink refuses must show up in dropped(), exactly once - the
+// same "never vanish silently" rule as the queue, applied to the disk side.
+static void test_sink_failures_count_as_dropped() {
+    std::cout << "test_sink_failures_count_as_dropped\n";
+
+    const size_t total = 1000;
+    std::ostringstream out;
+    uint64_t dropped = 0;
+    {
+        Recorder recorder(std::make_unique<FlakySink>(out));
+        for (size_t i = 0; i < total; ++i) {
+            recorder.write(0, "x\n");
+        }
+        recorder.stop();
+        dropped = recorder.dropped();
+    }
+
+    size_t written = split_lines(out.str()).size();
+    check(written == total / 2, "only the accepted half was written");
+    check(dropped == total / 2, "every refused record was counted as dropped");
+}
+
 int main() {
     test_nothing_is_lost();
     test_destructor_drains();
     test_stop_is_repeatable();
     test_bounded_queue_accounting();
+    test_sink_failures_count_as_dropped();
 
     if (failures == 0) {
         std::cout << "\nall checks passed\n";

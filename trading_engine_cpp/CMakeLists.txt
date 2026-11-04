@@ -99,4 +99,11 @@ add_executable(backoff_test
     src/backoff.cpp
 )
 
+# HourlyFileSink only uses the standard library and the operating
+# system's file calls, so it builds on its own too.
+add_executable(hourly_file_sink_test
+    src/hourly_file_sink_test.cpp
+    src/hourly_file_sink.cpp
+)
+
 

@@ -79,7 +79,7 @@ int main (int argc, char* argv[]){
     // That makes stdout the data channel - every log line below goes to
     // std::cerr so it can never end up inside the recorded file.
     // Declared before setOnMessageCallback below, which captures it.
-    Recorder recorder(std::cout);
+    Recorder recorder(std::make_unique<StreamSink>(std::cout));
 
     // Messages received since the last [stats] line. Two threads touch it:
     // the callback adds 1 per message, the main thread reads and resets it
@@ -136,7 +136,7 @@ int main (int argc, char* argv[]){
                                  ",\"data\":";
             record.append(payload);
             record += "}\n";
-            recorder.write(std::move(record));
+            recorder.write(recv_ts, std::move(record));
 
             // Recording is done. Everything below only exists to print the
             // message, so without --verbose skip it entirely - no parse, no

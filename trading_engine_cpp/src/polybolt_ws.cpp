@@ -184,7 +184,7 @@ int main(int argc, char* argv[]) {
     //     ./polybolt_ws > Data/polybolt.jsonl
     //     ./polybolt_ws | gzip > Data/polybolt.jsonl.gz
     // Declared before setOnMessageCallback below, which captures it.
-    Recorder recorder(std::cout);
+    Recorder recorder(std::make_unique<StreamSink>(std::cout));
 
     // Messages received since the last [stats] line. The callback adds 1,
     // the main thread reads and resets it - two threads, so atomic.
@@ -231,7 +231,7 @@ int main(int argc, char* argv[]) {
                                  ",\"data\":";
             record.append(payload);
             record += "}\n";
-            recorder.write(std::move(record));
+            recorder.write(recv_ts, std::move(record));
 
             if (verbose) {
                 std::cerr << "[recv] " << msg->str << std::endl;

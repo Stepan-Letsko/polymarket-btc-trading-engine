@@ -1,11 +1,11 @@
 #include "recorder.h" //including the recorder header file
 
-Recorder::Recorder(std::ostream& out, size_t max_queued) // Making the recorder constructor
-    : out_(out), max_queued_(max_queued) { // member list initialiser, i.e. before the constructor runs set the members to given values.
+Recorder::Recorder(std::unique_ptr<Sink> sink, size_t max_queued) // Making the recorder constructor
+    : sink_(std::move(sink)), max_queued_(max_queued) { // member list initialiser, i.e. before the constructor runs set the members to given values. std::move hands ownership of the sink over to us
     thread_ = std::thread(&Recorder::run, this); //Creating a thread for the recorder. Run run on this object
 }
 
-void Recorder::write(std::string line){ // Initialising recoreder, takes line by copy not reference because then if the reference disapears in other thread we still have a copy to write
+void Recorder::write(int64_t recv_ts, std::string line){ // Initialising recoreder, takes line by copy not reference because then if the reference disapears in other thread we still have a copy to write
 
     { //Scope block
         std::lock_guard<std::mutex> lock(mutex_); //Takes the mutex token to make thread safe
@@ -15,7 +15,7 @@ void Recorder::write(std::string line){ // Initialising recoreder, takes line by
             return; //RETURN
         }
 
-        queue_.push_back(std::move(line)); //If not overflow push the string to the back of the queue
+        queue_.push_back(Record{recv_ts, std::move(line)}); //If not overflow push the record to the back of the queue
         //std::move allows us to not copy the line and waste memory
     }
 
@@ -51,7 +51,7 @@ uint64_t Recorder::dropped() const { //Return the number of dropped messages
 }
 
 void Recorder::run() {
-    std::vector<std::string> batch; //Seperate vector that is private to the run function
+    std::vector<Record> batch; //Seperate vector that is private to the run function
 
     while (true) { //loop forever
         {
@@ -64,10 +64,14 @@ void Recorder::run() {
             break;
         }
 
-        for (const std::string& line : batch) {
-            out_ << line;
+        // The whole record goes to the sink, recv_ts included, so a sink
+        // can use it (the hourly file sink picks the file from it).
+        for (const Record& record : batch) {
+            if (!sink_->write(record)) {
+                dropped_++; // the sink couldn't save it - counted like a queue overflow
+            }
         }
-        out_.flush();
+        dropped_ += sink_->flush(); // records the sink accepted but then failed to get onto disk
 
         batch.clear();
     }

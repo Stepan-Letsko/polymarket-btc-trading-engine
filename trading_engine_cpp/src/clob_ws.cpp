@@ -206,7 +206,7 @@ int main(int argc, char* argv[]) {
     //     ./clob_ws > Data/clob.jsonl
     //     ./clob_ws | gzip > Data/clob.jsonl.gz
     // Declared before setOnMessageCallback below, which captures it.
-    Recorder recorder(std::cout);
+    Recorder recorder(std::make_unique<StreamSink>(std::cout));
 
     // Keep retrying rather than starting up with empty tokens - an empty
     // subscription would connect successfully and then sit silent
@@ -334,7 +334,7 @@ int main(int argc, char* argv[]) {
                                  ",\"data\":";
             record.append(payload);
             record += "}\n";
-            recorder.write(std::move(record));
+            recorder.write(recv_ts, std::move(record));
 
             // Recording is done. Parsing below only feeds handle_event's
             // prints, so without --verbose skip it entirely.
