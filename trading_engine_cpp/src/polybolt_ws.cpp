@@ -2,13 +2,14 @@
 //
 // On every connection open: send auth, wait for the server's "authed"
 // reply, then subscribe to both channels. Every message received - acks,
-// snapshots and live prices alike - is recorded raw to stdout. See
-// docs/polybolt_subscription.md for the connection sequence and
-// docs/polybolt_message_types.md for what each message means.
+// snapshots and live prices alike - is recorded raw (to hourly files with
+// --out-dir, otherwise to stdout). See docs/polybolt_subscription.md for
+// the connection sequence and docs/polybolt_message_types.md for what each
+// message means.
 //
 // Credentials come from the environment, never from code:
 //     set -a; source .env; set +a
-//     ./build/polybolt_ws > Data/polybolt.jsonl
+//     ./build/polybolt_ws --out-dir data
 
 #include <iostream>
 #include <ixwebsocket/IXWebSocket.h>
@@ -23,6 +24,7 @@
 #include <cstdint>
 #include <algorithm>
 #include "simdjson.h"
+#include "hourly_file_sink.h"
 #include "reconnector.h"
 #include "recorder.h"
 #include "runtime.h" // g_shutdown, install_signal_handlers, now_millis, sleep_until_ms
@@ -71,7 +73,9 @@ static std::string json_escape(const std::string& in) {
 static const char* kDefaultUrl = "wss://ws-live-v2.polymarket.com/ws";
 
 static void print_usage(const char* program) {
-    std::cerr << "Usage: " << program << " [--verbose] [--url <ws-url>]\n"
+    std::cerr << "Usage: " << program << " [--out-dir <folder>] [--verbose] [--url <ws-url>]\n"
+              << "  --out-dir   write one file per UTC hour into <folder>/polybolt/\n"
+              << "              (without it, records go to stdout)\n"
               << "  --verbose   print every received message to stderr (slow:\n"
               << "              each print blocks the receiving thread)\n"
               << "  --url       connect somewhere other than " << kDefaultUrl << "\n"
@@ -100,11 +104,19 @@ int main(int argc, char* argv[]) {
     // terminal on the same thread that stamps recv_ts.
     bool verbose = false;
     std::string url = kDefaultUrl;
+    std::string out_dir; // empty = no --out-dir given, write to stdout
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
         if (arg == "--verbose") {
             verbose = true;
+        } else if (arg == "--out-dir") {
+            if (i + 1 >= argc || argv[i + 1][0] == '\0') {
+                std::cerr << "--out-dir needs a folder\n";
+                print_usage(argv[0]);
+                return 1;
+            }
+            out_dir = argv[++i];
         } else if (arg == "--url") {
             // The next word is the value. i + 1 < argc checks it exists, so
             // "./polybolt_ws --url" alone is an error, not a crash.
@@ -155,6 +167,12 @@ int main(int argc, char* argv[]) {
         "\"secret\":\""     + json_escape(secret)     + "\","
         "\"passphrase\":\"" + json_escape(passphrase) + "\"}}";
 
+    // Checked before connecting: a folder we can't use should stop the
+    // program now, not leave it running for hours dropping every record.
+    if (!out_dir.empty() && !HourlyFileSink::check_folder(out_dir, "polybolt")) {
+        return 1;
+    }
+
     ix::WebSocket webSocket;
     webSocket.setUrl(url);
 
@@ -178,13 +196,21 @@ int main(int argc, char* argv[]) {
     // needs no locking.
     simdjson::ondemand::parser parser;
 
-    // Starts the writer thread. Destination is std::cout, same as the other
-    // recorders: stdout is the data channel and every log line goes to
-    // std::cerr, so file naming and compression are a launch-time choice:
-    //     ./polybolt_ws > Data/polybolt.jsonl
-    //     ./polybolt_ws | gzip > Data/polybolt.jsonl.gz
+    // Where records end up (see sink.h):
+    //   --out-dir data  ->  data/polybolt/polybolt_2026-11-04T14.jsonl, one per UTC hour
+    //   no --out-dir    ->  stdout, e.g. ./polybolt_ws > test.jsonl
+    // Either way every log line goes to std::cerr, so it can never end up
+    // inside the recorded data.
+    std::unique_ptr<Sink> sink;
+    if (!out_dir.empty()) {
+        sink = std::make_unique<HourlyFileSink>(out_dir, "polybolt");
+    } else {
+        sink = std::make_unique<StreamSink>(std::cout);
+    }
+
+    // Starts the writer thread, which now owns the sink.
     // Declared before setOnMessageCallback below, which captures it.
-    Recorder recorder(std::make_unique<StreamSink>(std::cout));
+    Recorder recorder(std::move(sink));
 
     // Messages received since the last [stats] line. The callback adds 1,
     // the main thread reads and resets it - two threads, so atomic.

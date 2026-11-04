@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <algorithm>
 #include "simdjson.h"
+#include "hourly_file_sink.h"
 #include "reconnector.h"
 #include "recorder.h"
 #include "runtime.h" // g_shutdown, install_signal_handlers, now_millis, sleep_until_ms
@@ -23,7 +24,9 @@ static const char* kDefaultUrl =
     "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@bookTicker/btcusdt@depth5@100ms&timeUnit=MICROSECOND";
 
 static void print_usage(const char* program) {
-    std::cerr << "Usage: " << program << " [--verbose] [--url <ws-url>]\n"
+    std::cerr << "Usage: " << program << " [--out-dir <folder>] [--verbose] [--url <ws-url>]\n"
+              << "  --out-dir   write one file per UTC hour into <folder>/binance/\n"
+              << "              (without it, records go to stdout)\n"
               << "  --verbose   print every parsed message to stderr (slow:\n"
               << "              each print blocks the receiving thread)\n"
               << "  --url       connect somewhere other than Binance\n"
@@ -40,11 +43,19 @@ int main (int argc, char* argv[]){
     // timestamps of every message queued behind it.
     bool verbose = false;
     std::string url = kDefaultUrl;
+    std::string out_dir; // empty = no --out-dir given, write to stdout
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
         if (arg == "--verbose") {
             verbose = true;
+        } else if (arg == "--out-dir") {
+            if (i + 1 >= argc || argv[i + 1][0] == '\0') {
+                std::cerr << "--out-dir needs a folder\n";
+                print_usage(argv[0]);
+                return 1;
+            }
+            out_dir = argv[++i];
         } else if (arg == "--url") {
             // The next word is the value. i + 1 < argc checks it exists, so
             // "./binance_ws --url" alone is an error, not a crash.
@@ -66,20 +77,32 @@ int main (int argc, char* argv[]){
         }
     }
 
+    // Checked before connecting: a folder we can't use should stop the
+    // program now, not leave it running for hours dropping every record.
+    if (!out_dir.empty() && !HourlyFileSink::check_folder(out_dir, "binance")) {
+        return 1;
+    }
+
     ix::WebSocket webSocket;
     webSocket.setUrl(url);
 
     simdjson::ondemand::parser parser;
 
-    // Starts the writer thread. Destination is std::cout deliberately, same
-    // as clob_ws: the Recorder does not decide where records land, so file
-    // naming and compression are a launch-time choice, e.g.
-    //     ./binance_ws > Data/binance.jsonl
-    //     ./binance_ws | gzip > Data/binance.jsonl.gz
-    // That makes stdout the data channel - every log line below goes to
-    // std::cerr so it can never end up inside the recorded file.
+    // Where records end up (see sink.h):
+    //   --out-dir data  ->  data/binance/binance_2026-11-04T14.jsonl, one per UTC hour
+    //   no --out-dir    ->  stdout, e.g. ./binance_ws > test.jsonl
+    // Either way every log line below goes to std::cerr, so it can never
+    // end up inside the recorded data.
+    std::unique_ptr<Sink> sink;
+    if (!out_dir.empty()) {
+        sink = std::make_unique<HourlyFileSink>(out_dir, "binance");
+    } else {
+        sink = std::make_unique<StreamSink>(std::cout);
+    }
+
+    // Starts the writer thread, which now owns the sink.
     // Declared before setOnMessageCallback below, which captures it.
-    Recorder recorder(std::make_unique<StreamSink>(std::cout));
+    Recorder recorder(std::move(sink));
 
     // Messages received since the last [stats] line. Two threads touch it:
     // the callback adds 1 per message, the main thread reads and resets it

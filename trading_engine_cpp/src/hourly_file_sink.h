@@ -25,6 +25,12 @@ public:
     HourlyFileSink(std::filesystem::path base_dir, std::string feed);
     ~HourlyFileSink() override; // writes what's left, fsyncs and closes
 
+    // For startup: makes sure <base_dir>/<feed> exists (creating it if
+    // needed) and that we're allowed to write in it. Prints the reason and
+    // returns false if not, so a mistyped --out-dir stops the program
+    // straight away instead of it running for hours dropping everything.
+    static bool check_folder(const std::filesystem::path& base_dir, const std::string& feed);
+
     // Owns an open file, so copying makes no sense - two copies would both
     // try to close the same file.
     HourlyFileSink(const HourlyFileSink&) = delete;

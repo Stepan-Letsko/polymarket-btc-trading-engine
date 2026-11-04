@@ -45,6 +45,23 @@ HourlyFileSink::~HourlyFileSink() {
     close_file();
 }
 
+bool HourlyFileSink::check_folder(const std::filesystem::path& base_dir, const std::string& feed) {
+    std::filesystem::path dir = base_dir / feed;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        std::cerr << "Cannot create " << dir.string() << ": " << ec.message() << std::endl;
+        return false;
+    }
+    // access(W_OK): "may this program create files here?" The folder can
+    // exist but belong to another user.
+    if (::access(dir.c_str(), W_OK) != 0) {
+        std::cerr << "Cannot write in " << dir.string() << ": " << std::strerror(errno) << std::endl;
+        return false;
+    }
+    return true;
+}
+
 bool HourlyFileSink::write(const Record& record) {
     int64_t hour = record.recv_ts / kMicrosPerHour;
 

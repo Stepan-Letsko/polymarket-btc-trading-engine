@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include "hourly_file_sink.h"
 #include "reconnector.h"
 #include "recorder.h"
 #include "runtime.h" // g_shutdown, install_signal_handlers, now_millis, sleep_until_ms
@@ -152,7 +153,9 @@ void handle_event(simdjson::ondemand::value event,
 static const char* kDefaultUrl = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
 static void print_usage(const char* program) {
-    std::cerr << "Usage: " << program << " [--verbose] [--url <ws-url>]\n"
+    std::cerr << "Usage: " << program << " [--out-dir <folder>] [--verbose] [--url <ws-url>]\n"
+              << "  --out-dir   write one file per UTC hour into <folder>/clob/\n"
+              << "              (without it, records go to stdout)\n"
               << "  --verbose   print every parsed event to stderr (slow:\n"
               << "              each print blocks the receiving thread)\n"
               << "  --url       connect somewhere other than " << kDefaultUrl << "\n"
@@ -167,11 +170,19 @@ int main(int argc, char* argv[]) {
     // timestamps of every message queued behind it.
     bool verbose = false;
     std::string url = kDefaultUrl;
+    std::string out_dir; // empty = no --out-dir given, write to stdout
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
         if (arg == "--verbose") {
             verbose = true;
+        } else if (arg == "--out-dir") {
+            if (i + 1 >= argc || argv[i + 1][0] == '\0') {
+                std::cerr << "--out-dir needs a folder\n";
+                print_usage(argv[0]);
+                return 1;
+            }
+            out_dir = argv[++i];
         } else if (arg == "--url") {
             // The next word is the value. i + 1 < argc checks it exists, so
             // "./clob_ws --url" alone is an error, not a crash.
@@ -193,6 +204,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Checked before connecting: a folder we can't use should stop the
+    // program now, not leave it running for hours dropping every record.
+    if (!out_dir.empty() && !HourlyFileSink::check_folder(out_dir, "clob")) {
+        return 1;
+    }
+
     ix::WebSocket webSocket; //Creating the websocket
     webSocket.setUrl(url); //Websocket URL
 
@@ -200,13 +217,21 @@ int main(int argc, char* argv[]) {
 
     SharedState state; //Creating the shared state structure
 
-    // Starts the writer thread. Destination is std::cout deliberately:
-    // the Recorder does not decide where records land, so file naming,
-    // rotation and compression are a launch-time choice, e.g.
-    //     ./clob_ws > Data/clob.jsonl
-    //     ./clob_ws | gzip > Data/clob.jsonl.gz
+    // Where records end up (see sink.h):
+    //   --out-dir data  ->  data/clob/clob_2026-11-04T14.jsonl, one per UTC hour
+    //                       (each record keeps its "window", so an hour simply
+    //                       holds 12 five-minute markets)
+    //   no --out-dir    ->  stdout, e.g. ./clob_ws > test.jsonl
+    std::unique_ptr<Sink> sink;
+    if (!out_dir.empty()) {
+        sink = std::make_unique<HourlyFileSink>(out_dir, "clob");
+    } else {
+        sink = std::make_unique<StreamSink>(std::cout);
+    }
+
+    // Starts the writer thread, which now owns the sink.
     // Declared before setOnMessageCallback below, which captures it.
-    Recorder recorder(std::make_unique<StreamSink>(std::cout));
+    Recorder recorder(std::move(sink));
 
     // Keep retrying rather than starting up with empty tokens - an empty
     // subscription would connect successfully and then sit silent

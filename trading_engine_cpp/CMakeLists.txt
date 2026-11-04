@@ -41,6 +41,7 @@ add_executable(binance_ws
     src/binance_ws.cpp
     third_party/simdjson/simdjson.cpp
     src/recorder.cpp
+    src/hourly_file_sink.cpp
     src/runtime.cpp
     src/backoff.cpp
     src/reconnector.cpp
@@ -63,6 +64,7 @@ add_executable(clob_ws
     third_party/simdjson/simdjson.cpp
     src/get_market.cpp
     src/recorder.cpp
+    src/hourly_file_sink.cpp
     src/runtime.cpp
     src/backoff.cpp
     src/reconnector.cpp
@@ -75,6 +77,7 @@ add_executable(polybolt_ws
     src/polybolt_ws.cpp
     src/runtime.cpp
     src/recorder.cpp
+    src/hourly_file_sink.cpp
     src/backoff.cpp
     src/reconnector.cpp
     third_party/simdjson/simdjson.cpp
