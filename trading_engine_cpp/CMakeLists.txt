@@ -139,4 +139,26 @@ add_executable(compress_file_test
 
 target_link_libraries(compress_file_test PRIVATE libzstd_static)
 
+# compress_hours: one pass over the data folder, compressing every
+# finished hour. Separate from the recorders so heavy compression can run
+# at low priority and can never crash live recording.
+add_executable(compress_hours
+    src/compress_hours.cpp
+    src/compress_pass.cpp
+    src/compress_file.cpp
+)
+
+target_link_libraries(compress_hours PRIVATE libzstd_static)
+
+# Also builds hourly_file_sink.cpp, to check compress_hours understands
+# exactly the file names the recorders write.
+add_executable(compress_hours_test
+    src/compress_hours_test.cpp
+    src/compress_pass.cpp
+    src/compress_file.cpp
+    src/hourly_file_sink.cpp
+)
+
+target_link_libraries(compress_hours_test PRIVATE libzstd_static)
+
 
