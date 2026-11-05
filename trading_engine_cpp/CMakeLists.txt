@@ -22,6 +22,27 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(ixwebsocket)
 
+# zstd (Zstandard) compresses finished hourly files. It's Facebook's
+# official C library, pinned to a release tag like IXWebSocket, so the Mac
+# and the Linux server build exactly the same code. Its CMake build lives
+# in build/cmake rather than the repo root, hence SOURCE_SUBDIR. Only the
+# static library is needed - not the zstd command-line tool, the shared
+# library or zstd's own tests - so those are switched off to keep the
+# build small. Legacy support (reading zstd's pre-2016 formats) is off too:
+# we only ever read files we wrote ourselves.
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG v1.5.7
+    SOURCE_SUBDIR build/cmake
+)
+FetchContent_MakeAvailable(zstd)
+
 # Threads::Threads is the portable way to ask for thread support: a no-op
 # on macOS, but it adds -pthread on Linux, where omitting it makes
 # std::thread fail at link time. Found up here, before any target, because
@@ -108,5 +129,14 @@ add_executable(hourly_file_sink_test
     src/hourly_file_sink_test.cpp
     src/hourly_file_sink.cpp
 )
+
+# compress_file: the "compress one finished hour safely" step. Linking
+# libzstd_static also brings in zstd's headers.
+add_executable(compress_file_test
+    src/compress_file_test.cpp
+    src/compress_file.cpp
+)
+
+target_link_libraries(compress_file_test PRIVATE libzstd_static)
 
 
