@@ -13,6 +13,7 @@ are at `./build/<name>` and recordings land in `data/` (git-ignored).
 | [`polybolt_ws`](#polybolt_ws) | records the Chainlink BTC price and the TWAP the markets resolve on |
 | [`compress_hours`](#compress_hours) | compresses finished hourly recordings to `.zst` |
 | [`get_market`](#get_market) | looks up a BTC 5m market's token ids (debugging) |
+| [`tools/latency_test.sh`](#toolslatency_testsh) | measures the round trip from this machine to a server |
 | [Tests](#tests) | five test programs, run after every build |
 
 ---
@@ -248,6 +249,47 @@ condition id: 0xabc...
 
 Exits 1 with `no valid market returned` if the market doesn't exist (yet)
 or the lookup failed.
+
+---
+
+## tools/latency_test.sh
+
+A bash script (not built by CMake) that measures how long a request takes
+to get an answer back from a server, over one reused connection, the way
+a trading client works. It's for comparing machines: run it on each one
+**at the same time**.
+
+```
+./tools/latency_test.sh [url] [count]
+```
+
+| Argument | Meaning | Default |
+|---|---|---|
+| `url` | what to ask. The default is an answer Cloudflare can't serve from memory, so every request reaches Polymarket's own server. | `https://clob.polymarket.com/time` |
+| `count` | how many requests to time, sent 5 per second (at least 10) | 1000 (~3.5 minutes) |
+
+```bash
+./tools/latency_test.sh                                       # Polymarket CLOB
+./tools/latency_test.sh https://api.binance.com/api/v3/time   # Binance
+```
+
+```
+front door only (TCP connect):    21.18 ms
+full round trip, 50 samples:
+  min 32.66   median 40.87   p90 101.25   p99 142.73   max 142.73 ms
+```
+
+- **Front door only:** one round trip to the nearest Cloudflare or
+  CloudFront location, which is what `ping` would show.
+- **Full round trip:** to the real server and back. Picture the samples
+  sorted from fastest to slowest: `median` is the middle one, and `p99`
+  is the one only 1% of requests were slower than, which shows how
+  consistent the connection is.
+
+The first request (which opens the connection) isn't counted, and
+neither are requests that had to reopen the connection or got an error
+status. These are reported as notes. Exits 1 if fewer than 95% of
+requests could be used. Needs only bash and curl 7.84 or newer.
 
 ---
 
