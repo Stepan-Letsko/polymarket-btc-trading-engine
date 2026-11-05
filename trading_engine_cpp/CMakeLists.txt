@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.16)
 project(trading_engine_cpp CXX)
 
+# Default to an optimised Release build. Without this, a plain "cmake .."
+# on a fresh machine picks no build type at all, which means no
+# optimisation - the recorders would quietly run several times slower.
+# Pass -DCMAKE_BUILD_TYPE=Debug to get a debug build on purpose.
+# (CMAKE_CONFIGURATION_TYPES is set by Xcode/Visual Studio, which choose
+# the build type themselves, so it's left alone there.)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
