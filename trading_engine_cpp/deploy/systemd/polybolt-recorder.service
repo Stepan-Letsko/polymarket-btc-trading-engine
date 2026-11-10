@@ -1,0 +1,69 @@
+# systemd unit: runs polybolt_ws permanently on the recording server.
+#
+# Install (on the server):
+#   sudo install -m 644 polybolt-recorder.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now polybolt-recorder
+#
+# Watch:
+#   systemctl status polybolt-recorder
+#   journalctl -u polybolt-recorder -f
+#
+# Same layout and settings as binance-recorder.service - see that file
+# for the reasoning behind each one. Two differences: the credentials
+# file, and no retrying after a permanent error (exit code 1).
+#
+# Comments must be on their own line: systemd would read anything after
+# "=" on the same line, including a "#", as part of the value.
+
+[Unit]
+Description=Polymarket PolyBolt Chainlink BTC/USD price and TWAP recorder
+Documentation=https://github.com/Stepan-Letsko/polymarket-btc-trading-engine/blob/main/trading_engine_cpp/docs/programs.md
+
+# Network up and clock synced first (needs chrony-wait.service enabled).
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+
+# 5 failures within 10 minutes: stop retrying and mark it "failed".
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+User=polyrecorder
+Group=polyrecorder
+
+# POLY_API_KEY, POLY_SECRET and POLY_PASSPHRASE. The file is root-only
+# (600): systemd reads it as root while starting the service and passes
+# the values in, so the polyrecorder account itself can't open the file.
+EnvironmentFile=/etc/polyrecorder/polybolt.env
+
+ExecStart=/opt/polyrecorder/bin/polybolt_ws --out-dir /var/lib/polyrecorder/data
+
+# Restart 2 seconds after the process dies; network problems (and the
+# server's 4003 "restarting") are handled inside the recorder.
+Restart=always
+RestartSec=2
+
+# Except exit code 1, which polybolt_ws only uses for errors retrying
+# can't fix: credentials missing or rejected (close codes 4001/4008),
+# or an unusable --out-dir. Repeating a rejected login would only risk
+# getting rate-limited or blocked, so the service stops and shows as
+# failed instead, for a human to look at.
+RestartPreventExitStatus=1
+
+# SIGTERM -> close, write the queue, exit. Up to 30 seconds.
+TimeoutStopSec=30
+
+# New files: owner writes, group reads, others nothing.
+UMask=0027
+
+# --- Lock-down ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/polyrecorder/data
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target

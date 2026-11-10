@@ -40,10 +40,13 @@ Group=polyrecorder
 
 ExecStart=/opt/polyrecorder/bin/binance_ws --out-dir /var/lib/polyrecorder/data
 
-# Restart whenever it stops by itself (crash or exit), after 10 seconds.
-# A deliberate "systemctl stop" doesn't count.
+# Restart whenever it stops by itself (crash or exit), after 2 seconds.
+# Network problems are handled inside the recorder (its own reconnect
+# with backoff); this only covers the process itself dying, where every
+# second of waiting is a second of data lost. A deliberate
+# "systemctl stop" doesn't count.
 Restart=always
-RestartSec=10
+RestartSec=2
 
 # On stop, systemd sends SIGTERM: the recorder closes the connection,
 # writes everything still queued and exits. Allow up to 30 seconds for
