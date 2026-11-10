@@ -1,0 +1,23 @@
+# systemd timer: starts compress-hours.service every 10 minutes.
+# A timer always starts the .service with the same name.
+#
+# Install and watch: see compress-hours.service.
+#
+# Comments must be on their own line: systemd would read anything after
+# "=" on the same line, including a "#", as part of the value.
+
+[Unit]
+Description=Compress finished hourly recordings every 10 minutes
+
+[Timer]
+# First pass 5 minutes after boot: picks up any hours that finished
+# while the machine was off, once the recorders have settled.
+OnBootSec=5min
+
+# Then 10 minutes after each pass started. A file becomes eligible 5
+# minutes after its hour ends, so it waits at most about 15 minutes.
+OnUnitActiveSec=10min
+
+[Install]
+# Start the timer at every boot.
+WantedBy=timers.target
