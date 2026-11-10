@@ -1,0 +1,73 @@
+# systemd unit: runs binance_ws permanently on the recording server.
+#
+# Install (on the server):
+#   sudo install -m 644 binance-recorder.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now binance-recorder
+#
+# Watch:
+#   systemctl status binance-recorder
+#   journalctl -u binance-recorder -f
+#
+# Expects the layout from the setup steps: the program in
+# /opt/polyrecorder/bin, data in /var/lib/polyrecorder/data, and the
+# polyrecorder service account.
+#
+# Comments must be on their own line: systemd would read anything after
+# "=" on the same line, including a "#", as part of the value.
+
+[Unit]
+Description=Binance BTCUSDT recorder
+Documentation=https://github.com/Stepan-Letsko/polymarket-btc-trading-engine/blob/main/trading_engine_cpp/docs/programs.md
+
+# Start only once the network is up and the clock is synced, so no
+# recv_ts is ever stamped by an unsynced clock after a reboot.
+# (time-sync.target only waits for chrony if chrony-wait.service is
+# enabled: sudo systemctl enable chrony-wait.service)
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+
+# If it fails 5 times within 10 minutes, stop retrying and mark the
+# service "failed" - something is permanently wrong and needs a human,
+# and retrying forever would only hide it.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+# The service account: can write the data folder and nothing else.
+User=polyrecorder
+Group=polyrecorder
+
+ExecStart=/opt/polyrecorder/bin/binance_ws --out-dir /var/lib/polyrecorder/data
+
+# Restart whenever it stops by itself (crash or exit), after 10 seconds.
+# A deliberate "systemctl stop" doesn't count.
+Restart=always
+RestartSec=10
+
+# On stop, systemd sends SIGTERM: the recorder closes the connection,
+# writes everything still queued and exits. Allow up to 30 seconds for
+# that before forcing it.
+TimeoutStopSec=30
+
+# New files: the recorder can write, its group (people allowed to read
+# the data) can read, everyone else gets nothing.
+UMask=0027
+
+# --- Lock-down: a second layer on top of file permissions ---
+# Can never gain more rights than it starts with.
+NoNewPrivileges=yes
+# The whole system is read-only for it...
+ProtectSystem=strict
+# ...except the data folder.
+ReadWritePaths=/var/lib/polyrecorder/data
+# /home looks empty to it.
+ProtectHome=yes
+# Its own private /tmp, invisible to other programs.
+PrivateTmp=yes
+# No access to hardware devices, which it never needs.
+PrivateDevices=yes
+
+[Install]
+# Start at every boot, once the machine reaches normal running mode.
+WantedBy=multi-user.target
