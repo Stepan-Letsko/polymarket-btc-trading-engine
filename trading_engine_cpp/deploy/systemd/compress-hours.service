@@ -44,6 +44,12 @@ Nice=19
 # Only use the disk when nothing else is.
 IOSchedulingClass=idle
 
+# Hard memory cap: a level-19 pass peaks around 215 MB, so 1 GB leaves
+# room for higher levels while keeping most of the machine for the
+# recorders. Over the cap, only this pass is killed; it leaves at most a
+# .tmp that the next pass overwrites, and the original .jsonl stays.
+MemoryMax=1G
+
 # New .zst files: owner writes, group reads, others nothing.
 UMask=0027
 

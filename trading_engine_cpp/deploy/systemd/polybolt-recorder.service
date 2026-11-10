@@ -54,6 +54,9 @@ RestartPreventExitStatus=1
 # SIGTERM -> close, write the queue, exit. Up to 30 seconds.
 TimeoutStopSec=30
 
+# Killed last if the machine runs out of memory.
+OOMScoreAdjust=-500
+
 # New files: owner writes, group reads, others nothing.
 UMask=0027
 

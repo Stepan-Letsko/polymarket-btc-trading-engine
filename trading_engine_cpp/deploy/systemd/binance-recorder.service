@@ -53,6 +53,15 @@ RestartSec=2
 # that before forcing it.
 TimeoutStopSec=30
 
+# If the machine runs out of memory, the kernel kills one process to
+# survive (the "OOM killer"), normally the one using the most memory.
+# -500 (range -1000..1000) makes it pick almost anything else first, so
+# a memory-hungry job can't take the recorder down with it. Not -1000
+# ("never kill"): if the recorder itself ever leaked memory, it should
+# be the one killed (and restarted 2s later) rather than the rest of the
+# machine, including SSH.
+OOMScoreAdjust=-500
+
 # New files: the recorder can write, its group (people allowed to read
 # the data) can read, everyone else gets nothing.
 UMask=0027
