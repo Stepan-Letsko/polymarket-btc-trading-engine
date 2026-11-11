@@ -55,6 +55,9 @@ Run these after building, and always on a new machine:
 Each prints `all checks passed` and exits 0, or names the failing check
 and exits 1.
 
+On Linux, also test the upload script (against a fake Google, no network
+needed): `../deploy/upload_hours_test.sh`.
+
 ## Programs
 
 | Program | What it does |

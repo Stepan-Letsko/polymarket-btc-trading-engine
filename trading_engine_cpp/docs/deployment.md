@@ -25,9 +25,9 @@ Replace these with the real values from your own notes:
 ## 1. Overview
 
 ```
- binance_ws ─┐                                            ┌─ Google Cloud Storage
- clob_ws     ├─► one .jsonl per feed per UTC hour ─► compress_hours ─► .zst ─► (upload job, to come)
- polybolt_ws ┘   /var/lib/polyrecorder/data/<feed>/     every 10 min                  gs://<BUCKET>
+ binance_ws ─┐
+ clob_ws     ├─► one .jsonl per feed per UTC hour ─► compress_hours ─► .zst ─► upload_hours ─► gs://<BUCKET>
+ polybolt_ws ┘   /var/lib/polyrecorder/data/<feed>/     every 10 min           every 10 min    <feed>/date=<day>/
 ```
 
 - **Three recorders**, each a systemd service running permanently and
@@ -35,9 +35,11 @@ Replace these with the real values from your own notes:
 - **compress-hours**, a systemd timer: every 10 minutes it compresses
   every finished hour to `.zst` (zstd level 19), verifies it, and only
   then deletes the `.jsonl`.
-- **Upload to Google Cloud Storage** (section 8, not built yet): the
+- **upload-hours**, a systemd timer: every 10 minutes it uploads new
+  `.zst` files to Google Cloud Storage, and deletes local copies once
+  they're 7 days old and proven identical in the bucket (section 8). The
   server proves who it is with Workload Identity Federation, so it holds
-  no Google password or key.
+  no Google password or key (section 6).
 
 Data volume, measured on 2026-11-10:
 
@@ -47,8 +49,9 @@ Data volume, measured on 2026-11-10:
 | binance | ~180–300 MB | ~7–12 MB (25×) |
 | polybolt | ~2 MB | ~0.14 MB |
 
-About **3.2 GB a day** compressed. The 58 GB disk (50 GB free) holds
-about two weeks, which is why the upload-and-cleanup job is needed.
+About **3.2 GB a day** compressed. With 7 days kept locally, the disk
+settles at about 25 GB of `.zst` files plus the hour being recorded
+(58 GB disk).
 
 ---
 
@@ -185,6 +188,8 @@ explains its settings in comments.
 | `polybolt-recorder.service` | runs permanently | `polybolt_ws --out-dir …`, with the credentials from `polybolt.env` |
 | `compress-hours.service` | one pass, then exits | `compress_hours --data-dir …` at idle priority |
 | `compress-hours.timer` | schedule | starts `compress-hours.service` 5 min after boot, then every 10 min |
+| `upload-hours.service` | one pass, then exits | `upload_hours` - installed in section 8, once the Google link (section 6) exists |
+| `upload-hours.timer` | schedule | starts `upload-hours.service` 8 min after boot, then every 10 min |
 
 ### 4.1 Install
 
@@ -467,6 +472,7 @@ of storing a corrupted file.
 3. Run section 4.1 (units).
 4. Attach the `polyrecorder-gcs-uploader` role (6.3, step 2).
 5. Run section 6.5 (CLI and settings file) and 6.6 (test).
+6. Run section 8.2 (upload job).
 
 The Google side (6.4) needs no change for a server in the same AWS
 account. For a different AWS account, the provider must trust the new
@@ -479,10 +485,100 @@ hours.
 
 ## 8. Upload job
 
-Not built yet. The plan: an `upload-hours` service and timer, running as
-`polyrecorder`. Each pass:
+[`deploy/upload_hours.sh`](../deploy/upload_hours.sh), run every 10
+minutes by `upload-hours.timer`. It's the only thing that deletes `.zst`
+files.
 
-1. Lists the bucket once, with each file's CRC32C.
-2. Uploads every local `.zst` file the bucket lacks, with `--no-clobber`.
-3. Deletes a local `.zst` file only when the bucket holds it with the
-   same CRC32C **and** it is older than 7 days.
+### 8.1 What a pass does
+
+1. **Finds** every `<feed>/<feed>_YYYY-MM-DDTHH.jsonl.zst`. `.jsonl` and
+   `.tmp` files are never touched.
+2. **Lists the bucket once**, only for the days still on disk, with each
+   file's size and CRC32C. This goes through Cloud Storage's JSON API
+   with `curl` and `jq`, because `gcloud storage ls` treats an empty day
+   as an error. If the listing fails, the pass stops: **nothing is
+   deleted**.
+3. **Uploads** every file the bucket lacks, to
+   `<feed>/date=YYYY-MM-DD/<file>`, with `--no-clobber`. Always in one
+   piece: `gcloud` would split files over 150 MB into parts joined in the
+   bucket, which needs delete permission the server doesn't have.
+4. **Deletes** a local file only when **all three** hold:
+   - its hour (from the name) ended more than 7 days ago;
+   - the bucket has it at the same size;
+   - the bucket has it with the same CRC32C. This is computed only at
+     this point, once per file.
+
+   A file uploaded in a pass is never deleted in the same pass: deleting
+   always follows a fresh listing.
+
+Exit code 1 if anything failed. The next pass retries it.
+
+### 8.2 Install
+
+Needs section 6 done first: the role, `gcloud`, and
+`/etc/polyrecorder/gcs-wif.json`.
+
+```bash
+sudo apt install -y jq
+
+# The script, from trading_engine_cpp/deploy
+sudo install -o root -g root -m 755 upload_hours.sh /opt/polyrecorder/bin/upload_hours
+
+# The bucket name, kept on the server rather than in the repo
+echo "BUCKET=<BUCKET>" | sudo tee /etc/polyrecorder/upload-hours.env > /dev/null
+sudo chmod 600 /etc/polyrecorder/upload-hours.env
+```
+
+Test the script against a fake Google (no network, safe at any time),
+then try a read-only dry run against the real bucket:
+
+```bash
+./upload_hours_test.sh       # "all checks passed"
+sudo CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=/etc/polyrecorder/gcs-wif.json \
+  ./upload_hours.sh --data-dir /var/lib/polyrecorder/data --bucket <BUCKET> --dry-run | tail
+```
+
+The units, from `deploy/systemd`. Run the first pass by hand, and
+follow it in a second window with `journalctl -u upload-hours -f`:
+
+```bash
+sudo install -m 644 upload-hours.service upload-hours.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemd-analyze verify /etc/systemd/system/upload-hours.service
+sudo systemctl start upload-hours          # waits until the pass is done
+sudo systemctl enable --now upload-hours.timer
+```
+
+**How the service reads the settings file:** `polyrecorder` can't enter
+`/etc/polyrecorder`. `LoadCredential=` makes systemd (as root) copy
+`gcs-wif.json` into a private folder only this service can see, and
+`CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE` points `gcloud` at the copy.
+`CacheDirectory=` gives `gcloud` the one writable folder it needs,
+`/var/cache/polyrecorder-gcloud`.
+
+### 8.3 Check
+
+```bash
+systemctl list-timers upload-hours.timer
+journalctl -u upload-hours --since today
+
+# How many files the bucket holds
+sudo CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=/etc/polyrecorder/gcs-wif.json \
+  gcloud storage ls -r "gs://<BUCKET>/**" | wc -l
+```
+
+What normal looks like:
+
+- **Each upload takes about 2 seconds, plus the transfer.** `gcloud`
+  starting up accounts for the 2 seconds, even for a 0.1 MB file. A
+  150 MB clob file takes about 4 seconds in total.
+- **Most passes say `nothing to do`.** About once an hour, a pass says
+  `3 uploaded`. From day 8 on, a pass also says `3 deleted` about once
+  an hour.
+- **"Memory peak" can reach the 1 GB cap on a big pass.** The count
+  includes the file cache from reading the files. At the cap, the kernel
+  drops cache rather than killing anything. The first pass (75 files,
+  3.5 GB) did this and succeeded.
+
+`NOT deleting …` in the log means a mismatch between the local file and
+the bucket. The file is kept, and needs a person to look at it.
