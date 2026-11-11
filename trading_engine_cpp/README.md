@@ -77,3 +77,6 @@ set -a; source .env; set +a; ./build/polybolt_ws --out-dir data
 Without `--out-dir`, the recorders write to stdout instead. Every option,
 example, output and exit code is in [docs/programs.md](docs/programs.md). The `docs/` folder describes each
 feed's connection and message format.
+
+Running them permanently on a server (systemd, compression, the upload
+to Google Cloud Storage) is in [docs/deployment.md](docs/deployment.md).
