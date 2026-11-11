@@ -29,7 +29,8 @@ Type=oneshot
 User=polyrecorder
 Group=polyrecorder
 
-# Level 19 until it's chosen from a full real hour on this machine.
+# Level 19, the program's default: chosen from a full real hour on this
+# machine (docs/deployment.md, section 5).
 ExecStart=/opt/polyrecorder/bin/compress_hours --data-dir /var/lib/polyrecorder/data
 
 # No Restart=: if a pass fails (exit 1), the next pass 10 minutes later
@@ -44,9 +45,8 @@ Nice=19
 # Only use the disk when nothing else is.
 IOSchedulingClass=idle
 
-# Hard memory cap: a level-19 pass peaks around 215 MB, so 1 GB leaves
-# room for higher levels while keeping most of the machine for the
-# recorders. Over the cap, only this pass is killed; it leaves at most a
+# Hard memory cap: a level-19 pass peaks around 221 MB, so 1 GB leaves
+# about 4x headroom while keeping most of the machine for the recorders. Over the cap, only this pass is killed; it leaves at most a
 # .tmp that the next pass overwrites, and the original .jsonl stays.
 MemoryMax=1G
 

@@ -182,7 +182,7 @@ priority, so it never slows the recorders.
 | Option | Meaning | Default |
 |---|---|---|
 | `--data-dir <folder>` | the folder the recorders write to (their `--out-dir`). **Required.** Must already exist. | |
-| `--level <1-22>` | zstd compression level: higher = smaller files, slower to compress. Opening them stays fast at every level. | 19 (until it's chosen from a full real hour of data) |
+| `--level <1-22>` | zstd compression level: higher = smaller files and slower to compress, up to 19; above 19 our data got no smaller (see [deployment.md](deployment.md#5-compression-level)). Opening them stays fast at every level. | 19 |
 | `--dry-run` | only list what would be compressed; change nothing | off |
 | `--help`, `-h` | print the options and exit | |
 

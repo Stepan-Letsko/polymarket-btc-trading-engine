@@ -24,8 +24,9 @@
 
 #include "compress_pass.h"
 
-// Until we've measured a full real hour (step 5c): 19 gave the smallest
-// files on the sample, and decompressing stays fast at every level.
+// 19: the smallest output on a full real hour of clob. Higher levels came
+// out no smaller, at twice the time and ten times the memory (benchmark
+// in docs/deployment.md, section 5). Decompressing is fast at every level.
 constexpr int kDefaultLevel = 19;
 
 static void print_usage(const char* program) {
