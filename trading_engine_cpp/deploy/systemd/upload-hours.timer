@@ -1,0 +1,23 @@
+# systemd timer: starts upload-hours.service every 10 minutes.
+# A timer always starts the .service with the same name.
+#
+# Install and watch: see upload-hours.service.
+#
+# Comments must be on their own line: systemd would read anything after
+# "=" on the same line, including a "#", as part of the value.
+
+[Unit]
+Description=Upload compressed recordings every 10 minutes
+
+[Timer]
+# First pass 8 minutes after boot: after compress-hours' first pass (at
+# 5 minutes) has had a head start, and not at the same moment.
+OnBootSec=8min
+
+# Then 10 minutes after each pass started. A file is uploaded at most
+# about 10 minutes after it's compressed.
+OnUnitActiveSec=10min
+
+[Install]
+# Start the timer at every boot.
+WantedBy=timers.target
