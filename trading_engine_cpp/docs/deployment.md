@@ -94,6 +94,23 @@ chronyc tracking     # "System time" = current offset
 
 ## 3. First setup
 
+**The quick way:** [`deploy/install.sh`](../deploy/install.sh) does
+everything in sections 3, 4 and 8.2 that can be done on the server, and
+checks for the rest. Run it as your normal login, from the repo clone:
+
+```bash
+cd ~/polymarket-btc-trading-engine/trading_engine_cpp
+deploy/install.sh --bucket <BUCKET>
+```
+
+It's safe to run again: each step checks whether it's already done, and
+if any test fails it stops before installing anything. It never creates
+the secrets (`polybolt.env`, `gcs-wif.json`). If one is missing, it lists
+what to do and doesn't start the services that need it. It ends with
+"All set.", or with a "Still to do by hand" list (exit code 1).
+
+The sections below are what it does, step by step.
+
 ### 3.1 Build and test
 
 ```bash
@@ -255,6 +272,13 @@ ps -o pid,rss,etime,comm -C clob_ws,binance_ws,polybolt_ws
 ```
 
 ### 4.4 Updating
+
+**The quick way:** after `git pull`, run `deploy/install.sh`. It
+rebuilds, tests, and installs only what changed. It leaves running
+recorders alone and says which ones run an old version; add
+`--restart` to restart them.
+
+By hand:
 
 **New unit files** (after `git pull`): repeat the `install` and
 `daemon-reload` from 4.1. Changes to a recorder's settings take effect
