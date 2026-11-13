@@ -87,8 +87,10 @@ step "Checks"
 [[ -r /etc/os-release ]] && . /etc/os-release
 [[ ${ID:-} == ubuntu ]] || die "this script is for Ubuntu (found: ${ID:-unknown})"
 ok "Ubuntu ${VERSION_ID:-}, running as $(id -un), repo at $cpp_dir"
-# Ask for the sudo password once, up front.
-sudo -v
+# Check sudo works, up front. A real command ("true" does nothing), not
+# "sudo -v": on AWS the ubuntu login may run any command without a
+# password, but "sudo -v" is a password check and asks for one anyway.
+sudo true
 
 # --- 1. Packages ---
 step "Packages"
