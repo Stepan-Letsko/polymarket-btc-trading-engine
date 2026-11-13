@@ -1,0 +1,62 @@
+# systemd unit: one pass of compress_hours, compressing every finished
+# hourly recording to .zst. Started every 10 minutes by
+# compress-hours.timer - this file says WHAT to run, the timer says WHEN.
+#
+# Install (on the server), together with the timer:
+#   sudo install -m 644 compress-hours.service compress-hours.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now compress-hours.timer
+#
+# Enable the TIMER, not this service: the service has no [Install]
+# section because nothing should start it except the timer (or a manual
+# "sudo systemctl start compress-hours" to run a pass right now).
+#
+# Watch:
+#   systemctl list-timers compress-hours.timer   (last and next run)
+#   journalctl -u compress-hours                 (what each pass did)
+#
+# Comments must be on their own line: systemd would read anything after
+# "=" on the same line, including a "#", as part of the value.
+
+[Unit]
+Description=Compress finished hourly recordings to zstd
+Documentation=https://github.com/Stepan-Letsko/polymarket-btc-trading-engine/blob/main/engine/docs/programs.md
+
+[Service]
+# A job that runs once and exits, unlike the recorders which run forever.
+Type=oneshot
+
+User=polyrecorder
+Group=polyrecorder
+
+# Level 19, the program's default: chosen from a full real hour on this
+# machine (docs/deployment.md, section 5).
+ExecStart=/opt/polyrecorder/bin/compress_hours --data-dir /var/lib/polyrecorder/data
+
+# No Restart=: if a pass fails (exit 1), the next pass 10 minutes later
+# picks up the same files again, and the failure shows in
+# "systemctl status compress-hours" in the meantime.
+
+# --- Lowest priority, so compression never slows the recorders ---
+# Only use the CPU when nothing else wants it. (Nice=19 on top is the
+# lowest normal priority, kept in case the idle policy is ever removed.)
+CPUSchedulingPolicy=idle
+Nice=19
+# Only use the disk when nothing else is.
+IOSchedulingClass=idle
+
+# Hard memory cap: a level-19 pass peaks around 221 MB, so 1 GB leaves
+# about 4x headroom while keeping most of the machine for the recorders. Over the cap, only this pass is killed; it leaves at most a
+# .tmp that the next pass overwrites, and the original .jsonl stays.
+MemoryMax=1G
+
+# New .zst files: owner writes, group reads, others nothing.
+UMask=0027
+
+# --- Lock-down, as for the recorders ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/polyrecorder/data
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes

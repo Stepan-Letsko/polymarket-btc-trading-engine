@@ -1,0 +1,85 @@
+# systemd unit: runs binance_ws permanently on the recording server.
+#
+# Install (on the server):
+#   sudo install -m 644 binance-recorder.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now binance-recorder
+#
+# Watch:
+#   systemctl status binance-recorder
+#   journalctl -u binance-recorder -f
+#
+# Expects the layout from the setup steps: the program in
+# /opt/polyrecorder/bin, data in /var/lib/polyrecorder/data, and the
+# polyrecorder service account.
+#
+# Comments must be on their own line: systemd would read anything after
+# "=" on the same line, including a "#", as part of the value.
+
+[Unit]
+Description=Binance BTCUSDT recorder
+Documentation=https://github.com/Stepan-Letsko/polymarket-btc-trading-engine/blob/main/engine/docs/programs.md
+
+# Start only once the network is up and the clock is synced, so no
+# recv_ts is ever stamped by an unsynced clock after a reboot.
+# (time-sync.target only waits for chrony if chrony-wait.service is
+# enabled: sudo systemctl enable chrony-wait.service)
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+
+# If it fails 5 times within 10 minutes, stop retrying and mark the
+# service "failed" - something is permanently wrong and needs a human,
+# and retrying forever would only hide it.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+# The service account: can write the data folder and nothing else.
+User=polyrecorder
+Group=polyrecorder
+
+ExecStart=/opt/polyrecorder/bin/binance_ws --out-dir /var/lib/polyrecorder/data
+
+# Restart whenever it stops by itself (crash or exit), after 2 seconds.
+# Network problems are handled inside the recorder (its own reconnect
+# with backoff); this only covers the process itself dying, where every
+# second of waiting is a second of data lost. A deliberate
+# "systemctl stop" doesn't count.
+Restart=always
+RestartSec=2
+
+# On stop, systemd sends SIGTERM: the recorder closes the connection,
+# writes everything still queued and exits. Allow up to 30 seconds for
+# that before forcing it.
+TimeoutStopSec=30
+
+# If the machine runs out of memory, the kernel kills one process to
+# survive (the "OOM killer"), normally the one using the most memory.
+# -500 (range -1000..1000) makes it pick almost anything else first, so
+# a memory-hungry job can't take the recorder down with it. Not -1000
+# ("never kill"): if the recorder itself ever leaked memory, it should
+# be the one killed (and restarted 2s later) rather than the rest of the
+# machine, including SSH.
+OOMScoreAdjust=-500
+
+# New files: the recorder can write, its group (people allowed to read
+# the data) can read, everyone else gets nothing.
+UMask=0027
+
+# --- Lock-down: a second layer on top of file permissions ---
+# Can never gain more rights than it starts with.
+NoNewPrivileges=yes
+# The whole system is read-only for it...
+ProtectSystem=strict
+# ...except the data folder.
+ReadWritePaths=/var/lib/polyrecorder/data
+# /home looks empty to it.
+ProtectHome=yes
+# Its own private /tmp, invisible to other programs.
+PrivateTmp=yes
+# No access to hardware devices, which it never needs.
+PrivateDevices=yes
+
+[Install]
+# Start at every boot, once the machine reaches normal running mode.
+WantedBy=multi-user.target

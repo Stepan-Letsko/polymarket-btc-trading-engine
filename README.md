@@ -74,7 +74,7 @@ Every number this system produces in paper/simulated mode assumes trades fill ex
 
 ## Getting started
 
-The C++ recorders in `trading_engine_cpp/` have their own build and run instructions: see [`trading_engine_cpp/README.md`](trading_engine_cpp/README.md). The server setup is in [`trading_engine_cpp/docs/deployment.md`](trading_engine_cpp/docs/deployment.md).
+The C++ recorders in `engine/` have their own build and run instructions: see [`engine/README.md`](engine/README.md). The server setup is in [`engine/docs/deployment.md`](engine/docs/deployment.md).
 
 ```bash
 git clone https://github.com/Stepan-Letsko/polymarket-btc-trading-engine.git
