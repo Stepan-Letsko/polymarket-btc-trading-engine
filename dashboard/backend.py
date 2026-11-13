@@ -10,11 +10,11 @@ import aiohttp
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-# trading_engine/ has no __init__.py — it's a folder of scripts, not an
+# legacy/trading_engine/ has no __init__.py — it's a folder of scripts, not an
 # installable package. We add it to the import path so we can reuse
 # each exchange feed's stream_X() function instead of duplicating that
 # connection logic here.
-ENGINE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "trading_engine"))
+ENGINE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "legacy", "trading_engine"))
 sys.path.insert(0, ENGINE_DIR)
 
 from Binance_ws import stream_binance                  # noqa: E402
@@ -81,7 +81,7 @@ async def _safe_send(client: WebSocket, payload: dict) -> None:
 
 
 # ── Per-exchange message handlers ──────────────────────────────────
-# Every exchange script in trading_engine/ hands back its own message
+# Every exchange script in legacy/trading_engine/ hands back its own message
 # shape (different field/type names), so each of these picks out "is
 # this a price update, and what's the price" before calling broadcast().
 
@@ -179,7 +179,7 @@ async def broadcast_indicators_forever() -> None:
 # Polymarket's BTC Up/Down markets run in fixed 5-minute (300 second)
 # windows, resolved against a 60-second Chainlink TWAP captured as each
 # window opens ("Price To Beat" / P0). We used to reconstruct that TWAP
-# ourselves from raw Chainlink ticks (trading_engine/twap.py), but found
+# ourselves from raw Chainlink ticks (legacy/trading_engine/twap.py), but found
 # it could be off by $0.19-$1.22 depending on volatility — traced to
 # Polymarket's own Chainlink relay only giving whole-second timestamps,
 # a data-resolution ceiling no amount of our own code could fix.

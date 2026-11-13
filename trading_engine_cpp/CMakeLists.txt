@@ -60,14 +60,6 @@ FetchContent_MakeAvailable(zstd)
 # starts a std::thread) needs it.
 find_package(Threads REQUIRED)
 
-add_executable(main
-    src/main.cpp
-    third_party/simdjson/simdjson.cpp
-)
-
-target_include_directories(main PRIVATE third_party/simdjson)
-target_link_libraries(main PRIVATE ixwebsocket)
-
 add_executable(binance_ws
     src/binance_ws.cpp
     third_party/simdjson/simdjson.cpp

@@ -20,9 +20,9 @@ This project simplifies and modularises the trading pipeline for this specific m
 
 **What's solid, reusable infrastructure:**
 - Concurrent WebSocket ingestion from Binance, Coinbase, and Polymarket's own RTDS relay (which carries both a Binance passthrough and the actual Chainlink resolution oracle)
-- Correct 5-minute window boundary detection and TWAP calculation, shared between the trading scripts and the dashboard via [`twap.py`](trading_engine/twap.py).
-- Pure, stateless leading-indicator functions ([`indicators.py`](trading_engine/indicators.py)), order book imbalance and trade-flow delta, usable by both live trading logic and the dashboard's real-time display
-- Real order execution against Polymarket's CLOB ([`Order_client.py`](trading_engine/Order_client.py)), with structured lifecycle logging of every signal and trade ([`trade_logger.py`](trading_engine/trade_logger.py))
+- Correct 5-minute window boundary detection and TWAP calculation, shared between the trading scripts and the dashboard via [`twap.py`](legacy/trading_engine/twap.py).
+- Pure, stateless leading-indicator functions ([`indicators.py`](legacy/trading_engine/indicators.py)), order book imbalance and trade-flow delta, usable by both live trading logic and the dashboard's real-time display
+- Real order execution against Polymarket's CLOB ([`Order_client.py`](legacy/trading_engine/Order_client.py)), with structured lifecycle logging of every signal and trade ([`trade_logger.py`](legacy/trading_engine/trade_logger.py))
 - Automatic feed reconnection with a silence timeout, not just exception-based retry, but detection of a feed that's gone silently stale (observed once in testing with the Chainlink relay: connection stayed open, stopped producing messages, no error thrown)
 
 ## Deployment note
@@ -42,7 +42,7 @@ Every number this system produces in paper/simulated mode assumes trades fill ex
 
 ```
 .
-├── trading_engine/
+├── legacy/trading_engine/
 │   ├── Binance_ws.py, Coinbase_ws.py,       # Exchange WebSocket clients — each yields a
 │   │   Bitstamp_ws.py, kraken_ws.py          # normalized stream of ticks/trades/depth
 │   ├── rtds_ws.py                            # Polymarket's own relay: Binance passthrough
@@ -64,10 +64,10 @@ Every number this system produces in paper/simulated mode assumes trades fill ex
 │   └── logs/trades.jsonl                       # Signal/trade event log
 ├── dashboard/
 │   ├── backend.py                              # FastAPI + WebSocket server — reuses the
-│   │                                           # trading_engine/ stream functions directly
+│   │                                           # legacy/trading_engine/ stream functions directly
 │   │                                           # rather than reimplementing feed handling
 │   └── static/index.html                       # Live chart + indicator panel (vanilla JS)
-├── requirements.txt, dashboard/requirements.txt, trading_engine/requirements.txt
+├── requirements.txt, dashboard/requirements.txt, legacy/trading_engine/requirements.txt
 └── .env.example                                # Template for required credentials
 ```
 
@@ -81,14 +81,14 @@ git clone https://github.com/Stepan-Letsko/polymarket-btc-trading-engine.git
 cd polymarket-btc-trading-engine
 
 # set up your own credentials — never commit this file or share its contents
-cp trading_engine/.env.example trading_engine/.env
-# then fill in trading_engine/.env with your own wallet private key and Polymarket API credentials
+cp legacy/trading_engine/.env.example legacy/trading_engine/.env
+# then fill in legacy/trading_engine/.env with your own wallet private key and Polymarket API credentials
 
-pip install -r trading_engine/requirements.txt
+pip install -r legacy/trading_engine/requirements.txt
 pip install -r dashboard/requirements.txt
 ```
 
-`trading_engine/.env` needs the following keys: never commit this file or share its contents once filled in:
+`legacy/trading_engine/.env` needs the following keys: never commit this file or share its contents once filled in:
 
 ```dotenv
 PRIVATE_KEY=""
