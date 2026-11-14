@@ -1,0 +1,31 @@
+[project]
+name = "research"
+version = "0.1.0"
+description = "Research on the recorded Polymarket BTC 5-minute market data: conversion to Parquet, analysis and ML"
+readme = "README.md"
+authors = [
+    { name = "Stepan Letsko" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]
+xfail_strict = true
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "PT", "RUF"]
